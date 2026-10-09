@@ -134,6 +134,44 @@ Inicio original → crear/seleccionar piloto → menús originales
 volver al menú → cerrar/abrir → piloto y datos intactos.
 
 ## Next step
-UNO: decisión de arquitectura PATH A vs PATH B (pregunta al
-usuario abajo). Sin esa respuesta no se escribe código: los
-implementaciones divergen totalmente.
+UNO (obsoleto): PATH B ELEGIDO por el usuario 2026-10-09.
+
+## 8. S3-prep: superficie de port DuelVR→M8 (solo lectura)
+
+DuelVR (origen, validado M6):
+- `duel_hands.*`: XR_EXT_hand_tracking (Init/Locate/Get 26
+  joints), Local2Game (seat-cal + ship + inertia), grab/fist/
+  pinch, stick/quad/lever deflections, thumb-fire, platform
+  hand-mesh skinning. SDL-free, CPU-testeado.
+- `duel_math.h`: `DuelSeatCal` + `duel_cal_neutralize` +
+  `duel_eye_pose_motion` (asiento/HMD/calibración).
+- Main publica: throttle/stick/lever/fire al sim propio.
+
+M8 (destino, estado real):
+- Input = acciones XR → eventos SDL encolados pre-frame
+  (`M8_InputPoll`); vuelo Touch probado.
+- `vr_stick_logic.h`: YA EXISTE lógica de stick agarrable
+  (grip cockpit-local + squeeze → out_pitch/out_roll). Punto
+  de injerto natural para deflexiones de manos.
+- Asiento/cámara: `t3_seat_math.h` + `vr_eye_math.h`
+  (esquema distinto al DuelSeatCal: alinear, no duplicar).
+- Manos: CERO (confirmado, sin hand-tracking).
+
+Capas de port propuestas (cada una con A/B Touch):
+1. Hand-tracking solo visual (joints + mallas, telemetría).
+2. Pinch/stick-agarrado → `VrStick_Update` (pitch/roll).
+3. Palanca throttle/roll mano izquierda → eventos eje/tecla.
+4. Disparo pulgar → fire nativo.
+5. Seat-cal DuelVR vs T3: medir y unificar (NO dos sistemas).
+Regla: sin gestos en menús (B-menu/modal usan cursor+RT).
+
+## 9. S1: validaciones M8 pendientes (requieren visor/usuario)
+
+1. SP1/SP2: escaramuza → B → Return/Abort → setup → relanzar.
+2. Probe-4: B-menu en misión 30s quieto (¿texto estable?).
+3. Cierre/reapertura: piloto + stats .plt intactos.
+Protocolo detallado en SP1-RETURN-STATUS.md §prueba física.
+
+## Next step
+UNO: usuario corre S1 en visor (M8 instalado) y reporta;
+en paralelo Muse audita bindings S2 (solo lectura).
