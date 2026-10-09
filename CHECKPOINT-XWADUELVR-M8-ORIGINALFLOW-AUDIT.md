@@ -229,5 +229,25 @@ UNO (obsoleto): roster IMPLEMENTADO y entregado, ver §12.
 - DuelVR congelado como referencia (`dffbf21`+).
 
 ## Next step
-UNO: validación física usuario (protocolo §6 de
-PATHB1-DELIVERY.md); después S3 manos/palancas por capas.
+UNO (obsoleto): usuario validando S1b (retorno + 2º piloto).
+
+## 13. Aclaraciones + base S3 (2026-10-09)
+
+- "Sin roster al arrancar" = con 1 piloto válido y sin
+  request, el boot entra directo (roster existe pero no
+  interrumpe). "Roster pre-boot" = el diálogo vive antes del
+  hilo nativo y SOLO aparece si: RC+LC pedido, 0 pilotos, o
+  lastpilot inválido.
+- Usar roster: en MENÚ (no vuelo) pulsar RC+LC → sale →
+  reabrir → lista o NUEVO + teclado → entra con ese piloto.
+- Base S3: M6 v3.6-M6-axissplit (`E28B730E…`), APROBADO por
+  usuario. Mapeo validado = derecha pitch/yaw, izquierda
+  throttle/roll, release→neutral salvo throttle. CERO
+  diferencias vs lo solicitado. + agarre libre (cualquiera/
+  cualquiera) y disparo pulgar (M3.6/M5 validados).
+
+## Next step
+UNO: S3 por etapas tras resultado S1b del usuario:
+S3.1 manos visibles → S3.2 agarre+palancas → S3.3 disparo
+y transiciones. Sin validación física declarada hasta su
+reporte.
