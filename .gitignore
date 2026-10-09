@@ -1,0 +1,12 @@
+/build-android/
+/.evidence-tmp/
+.gradle/
+app/build/
+local.properties
+build/
+app-debug.apk
+# Local-only, preserved on disk: staged APKs, cooked/proprietary
+# assets, and the evidence store (photos, logs, test binaries).
+XWADuelVR-*.apk
+/assets/
+/evidence/
