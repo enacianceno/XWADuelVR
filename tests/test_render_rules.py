@@ -551,6 +551,12 @@ def main():
     check("M7 menu ranges gated on panel show",
           "menu_tri_range.first = dw.count;" in text
           and "if (r->menu_show && r->menu)" in text)
+    check("M7 menu ranges are drawn (emit => draw)",
+          "SDL_DrawGPUPrimitives(rp, (Uint32)menu_tri_range.count, 1, (Uint32)menu_tri_range.first, 0);" in text
+          and "SDL_DrawGPUPrimitives(rp, (Uint32)menu_line_range.count, 1, (Uint32)menu_line_range.first, 0);" in text
+          and "r->pipe_tri_alpha" in text
+          and text.find("menu_line_range.count = dw.count") <
+          text.find("(Uint32)menu_tri_range.count, 1"))
     # 40. M7 main: sim frozen outside combat, result recorded once.
     main_text = (SRC.parent / "duel_main.c").read_text(encoding="utf-8")
     check("M7 sim only steps in combat",

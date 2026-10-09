@@ -2334,8 +2334,19 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
                 if (!h->active) continue;
                 if (!h->j[6].pos_valid || !h->j[10].pos_valid) continue;
                 {
-                    DuelVec3 tip = hw[sd][10];
-                    DuelVec3 d = duel_v3_sub(tip, hw[sd][6]);
+                    /* NOT hw[][]: with platform meshes the joint loop
+                     * above is skipped, leaving hw uninitialized. */
+                    DuelVec3 tip, mcp;
+                    DuelVec3 d;
+                    DuelHands_JointWorld(&r->cal, s->player.orient,
+                                         s->player.pos, DUEL_SEAT_POS,
+                                         r->motion.off_p, hmo, &h->j[10],
+                                         &tip);
+                    DuelHands_JointWorld(&r->cal, s->player.orient,
+                                         s->player.pos, DUEL_SEAT_POS,
+                                         r->motion.off_p, hmo, &h->j[6],
+                                         &mcp);
+                    d = duel_v3_sub(tip, mcp);
                     float dl = duel_v3_len(d);
                     float denom, t;
                     if (dl < 1e-6f) continue;
@@ -3202,6 +3213,19 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
             SDL_DrawGPUPrimitives(rp, (Uint32)hud_range.count, 1, (Uint32)hud_range.first, 0);
         if (flash_range.count > 0)
             SDL_DrawGPUPrimitives(rp, (Uint32)flash_range.count, 1, (Uint32)flash_range.first, 0);
+    }
+    /* M7 menu panel: world-space tris (alpha, depth off) first, then
+     * glyph strokes + hand rays (lines, depth off). Empty ranges when
+     * the panel is hidden, so count>0 is the only gate needed. */
+    if (menu_tri_range.count > 0) {
+        SDL_BindGPUGraphicsPipeline(rp, r->pipe_tri_alpha);
+        SDL_PushGPUVertexUniformData(cmd, 0, &uvsu, sizeof uvsu);
+        SDL_DrawGPUPrimitives(rp, (Uint32)menu_tri_range.count, 1, (Uint32)menu_tri_range.first, 0);
+    }
+    if (menu_line_range.count > 0) {
+        SDL_BindGPUGraphicsPipeline(rp, r->pipe_lines);
+        SDL_PushGPUVertexUniformData(cmd, 0, &uvsu, sizeof uvsu);
+        SDL_DrawGPUPrimitives(rp, (Uint32)menu_line_range.count, 1, (Uint32)menu_line_range.first, 0);
     }
     /* P1.5: authentic sprites. Lit shaders, vertex-baked world quads
      * (model=identity, mvp=vp): black base kills the lit term, the sprite

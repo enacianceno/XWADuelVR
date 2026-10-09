@@ -278,6 +278,22 @@ gesto (requiere controller); sin campaña/hangar/cuerpo piloto.
 - M6 preservado: `XWADuelVR-M6-AXISSPLIT-debug.apk` intacto
   (reinstalable si M7 regresa).
 
+## 11b. Hotfix MENUa (2026-10-09, "juego congelado")
+
+Síntoma físico: app a 72 fps, sim quieta en spawn, sin panel =
+parecía congelada. Causa: los rangos del menú se EMITÍAN pero
+nunca se DIBUJABAN (faltaban los `DrawGPUPrimitives`).
+Fix: draws `pipe_tri_alpha` + `pipe_lines` tras el bloque HUD
++ regla de regresión "emit => draw". Segundo fix: el rayo de
+manos leía `hw[][]` sin inicializar con hand-mesh activo;
+ahora usa `JointWorld` directo.
+- APK: `XWADuelVR-M7-MENUa-DRAWFIX-debug.apk`, v3.7-M7-menu-a,
+  2234131 bytes,
+  SHA-256 `48862BEBDA84BCBA3F9456B5A70E22287B1666B4B7411BD933A912C147FBD62C`.
+  Instalado con `install -r` en 3487C10H9T0BKZ.
+- Reglas: 129/129 PASS. CPU suite sin cambios (lógica nueva
+  solo render).
+
 ## 12. Git
 
 - `2a33a12` M6 approved baseline (commit inicial).
