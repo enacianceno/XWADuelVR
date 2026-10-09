@@ -294,6 +294,20 @@ ahora usa `JointWorld` directo.
 - Reglas: 129/129 PASS. CPU suite sin cambios (lógica nueva
   solo render).
 
+## 11c. Hotfix MENUb (2026-10-09, "menú debajo de mí")
+
+Causa: el anchor del panel se colocaba en espacio LOCAL del
+HMD pero se dibujaba como si fuera espacio de juego (nave).
+Fix: el eye pass convierte LOCAL→juego por la ruta exacta
+del ojo/manos (`neutralize` + `eye_pose_motion`); docs +
+regla "LOCAL=>game". Manos/rayos ya usaban esa ruta, ahora
+panel y rayos coinciden en el mismo frame.
+- APK: `XWADuelVR-M7-MENUB-PANELFIX-debug.apk`,
+  v3.7-M7-menu-b,
+  SHA-256 `C6001155405DEFD976A0F587DDD81268801B4A479BB8B9D0D4279ABEF9A75639`.
+  Instalado con `install -r` en 3487C10H9T0BKZ.
+- Reglas: 130/130 PASS.
+
 ## 12. Git
 
 - `2a33a12` M6 approved baseline (commit inicial).

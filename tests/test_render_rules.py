@@ -551,6 +551,13 @@ def main():
     check("M7 menu ranges gated on panel show",
           "menu_tri_range.first = dw.count;" in text
           and "if (r->menu_show && r->menu)" in text)
+    check("M7 menu anchor LOCAL=>game through eye path",
+          "DuelVec3 menu_c = r->menu_center;" in text
+          and "duel_cal_neutralize(&r->cal, r->menu_center, r->menu_quat" in text
+          and "duel_eye_pose_motion(s->player.orient, s->player.pos, DUEL_SEAT_POS," in text
+          and "duel_q_right(menu_q)" in text
+          and "duel_v3_sub(hit, menu_c)" in text
+          and "duel_q_right(r->menu_quat)" not in text)
     check("M7 menu ranges are drawn (emit => draw)",
           "SDL_DrawGPUPrimitives(rp, (Uint32)menu_tri_range.count, 1, (Uint32)menu_tri_range.first, 0);" in text
           and "SDL_DrawGPUPrimitives(rp, (Uint32)menu_line_range.count, 1, (Uint32)menu_line_range.first, 0);" in text

@@ -54,7 +54,9 @@ int DuelRender_HandStick(const DuelRender *r, float *pd, float *rd);
 int DuelRender_HandLever(const DuelRender *r, float *ld);
 /* M7: hand-lever sensitivity (clamped 0.5..1.5, default 1.0). */
 void DuelRender_SetHandSens(DuelRender *r, float sens);
-/* M7 menu panel + interaction (main-owned DuelMenu, see duel_menu.h). */
+/* M7 menu panel + interaction (main-owned DuelMenu, see duel_menu.h).
+ * center/quat are a LOCAL-space anchor (head frame); the eye pass brings
+ * them to game space through the exact eye/hand path. */
 #include "duel_menu.h"
 void DuelRender_SetMenuPanel(DuelRender *r, int show, const DuelMenu *m,
                              DuelVec3 center, DuelQuat quat);

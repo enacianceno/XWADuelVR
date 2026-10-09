@@ -207,8 +207,8 @@ struct DuelRender {
     /* M7 menu panel (world-locked, placed once per screen by main). */
     int menu_show;
     int menu_hide_hud; /* menu/result: no cue/diamond/lead/bars */
-    DuelVec3 menu_center;
-    DuelQuat menu_quat; /* duel_q_forward points INTO the screen */
+    DuelVec3 menu_center; /* LOCAL anchor (see SetMenuPanel) */
+    DuelQuat menu_quat; /* LOCAL; duel_q_forward points INTO the screen */
     const DuelMenu *menu; /* main-owned, valid for the run */
     int menu_hover;     /* hand-ray row (-1 none), eye 0+1 agree */
     float menu_hx, menu_hy; /* hover point, panel-local */
@@ -2144,6 +2144,27 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
     DuelMat4 vp = duel_m4_mul(proj, view);
     DuelVec3 cam_pos = ep;
     DuelVec3 cam_fwd = duel_q_forward(eq);
+    /* M7: the stored panel anchor is LOCAL (main placed it from the LOCAL
+     * head pose); bring it to game space through the exact eye path, or
+     * the panel lands in the wrong frame (user saw it underfoot). */
+    DuelVec3 menu_c = r->menu_center;
+    DuelQuat menu_q = r->menu_quat;
+    if (r->menu_show && r->menu) {
+        DuelVec3 mcp;
+        DuelQuat mcq;
+        duel_cal_neutralize(&r->cal, r->menu_center, r->menu_quat, &mcp, &mcq);
+#if DUEL_VEHICLE_MOTION_FEEL
+        {
+            DuelQuat mo_q = duel_motion_quat(&r->motion);
+            duel_eye_pose_motion(s->player.orient, s->player.pos, DUEL_SEAT_POS,
+                                 r->motion.off_p, mo_q, mcq, mcp,
+                                 &menu_q, &menu_c);
+        }
+#else
+        duel_eye_pose(s->player.orient, s->player.pos, DUEL_SEAT_POS,
+                      mcq, mcp, &menu_q, &menu_c);
+#endif
+    }
 
     SDL_GPUColorTargetInfo color;
     memset(&color, 0, sizeof color);
@@ -2316,9 +2337,9 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         /* M7: menu hand-ray hover (index MCP->tip) + pinch levels. Both
          * eyes compute the same inputs: idempotent, no per-eye drift. */
         if (r->menu_show && r->menu) {
-            DuelVec3 pax = duel_q_right(r->menu_quat);
-            DuelVec3 pay = duel_q_up(r->menu_quat);
-            DuelVec3 pn = duel_v3_scale(duel_q_forward(r->menu_quat), -1.0f);
+            DuelVec3 pax = duel_q_right(menu_q);
+            DuelVec3 pay = duel_q_up(menu_q);
+            DuelVec3 pn = duel_v3_scale(duel_q_forward(menu_q), -1.0f);
             float ph = DuelMenu_PanelH(r->menu);
             int order[2] = { 1, 0 }; /* right hand wins ties */
             int o;
@@ -2356,11 +2377,11 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
                     r->menu_ray_e[sd] = duel_v3_add(tip, duel_v3_scale(d, 1.5f));
                     denom = duel_v3_dot(d, pn);
                     if (fabsf(denom) < 1e-6f) continue;
-                    t = duel_v3_dot(duel_v3_sub(r->menu_center, tip), pn) / denom;
+                    t = duel_v3_dot(duel_v3_sub(menu_c, tip), pn) / denom;
                     if (t < 0.0f) continue;
                     {
                         DuelVec3 hit = duel_v3_add(tip, duel_v3_scale(d, t));
-                        DuelVec3 rel = duel_v3_sub(hit, r->menu_center);
+                        DuelVec3 rel = duel_v3_sub(hit, menu_c);
                         float lx = duel_v3_dot(rel, pax);
                         float ly = duel_v3_dot(rel, pay);
                         if (fabsf(lx) > DUEL_MENU_PANEL_W * 0.5f ||
@@ -2542,10 +2563,10 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
     menu_tri_range.first = dw.count;
     menu_line_range.first = dw.count;
     if (r->menu_show && r->menu) {
-        DuelVec3 pax = duel_q_right(r->menu_quat);
-        DuelVec3 pay = duel_q_up(r->menu_quat);
-        DuelVec3 cc = duel_v3_add(r->menu_center,
-            duel_v3_scale(duel_q_forward(r->menu_quat), -0.002f));
+        DuelVec3 pax = duel_q_right(menu_q);
+        DuelVec3 pay = duel_q_up(menu_q);
+        DuelVec3 cc = duel_v3_add(menu_c,
+            duel_v3_scale(duel_q_forward(menu_q), -0.002f));
         float ph = DuelMenu_PanelH(r->menu);
         float pw = DUEL_MENU_PANEL_W;
         DuelMenuRow rows[DUEL_MENU_MAXROWS];
@@ -2587,10 +2608,10 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
     menu_tri_range.count = dw.count - menu_tri_range.first;
     menu_line_range.first = dw.count;
     if (r->menu_show && r->menu) {
-        DuelVec3 pax = duel_q_right(r->menu_quat);
-        DuelVec3 pay = duel_q_up(r->menu_quat);
-        DuelVec3 cc = duel_v3_add(r->menu_center,
-            duel_v3_scale(duel_q_forward(r->menu_quat), -0.004f));
+        DuelVec3 pax = duel_q_right(menu_q);
+        DuelVec3 pay = duel_q_up(menu_q);
+        DuelVec3 cc = duel_v3_add(menu_c,
+            duel_v3_scale(duel_q_forward(menu_q), -0.004f));
         float ph = DuelMenu_PanelH(r->menu);
         DuelMenuRow rows[DUEL_MENU_MAXROWS];
         int n = DuelMenu_Rows(r->menu, rows, DUEL_MENU_MAXROWS);
