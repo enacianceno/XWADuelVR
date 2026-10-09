@@ -22,6 +22,9 @@
 
 void DuelAudio_InitState(DuelAudioState *st) {
     memset(st, 0, sizeof(*st));
+    st->vol_master = DUEL_AUDIO_MASTER;
+    st->vol_music = G_MUSIC;
+    st->vol_sfx = 1.0f;
     st->last_alive_p = 1;
     { /* M5 */
         int k;
@@ -46,8 +49,8 @@ static void trigger(DuelAudioState *st, DuelAudioEvent ev, float lg, float rg) {
         v->snd = snd;
         v->pos = 0.0;
         v->step = (double)snd->rate / (double)DUEL_AUDIO_RATE;
-        v->lgain = lg;
-        v->rgain = rg;
+        v->lgain = lg * st->vol_sfx; /* M7: every one-shot is an "effect" */
+        v->rgain = rg * st->vol_sfx;
         v->active = 1;
         v->loop = 0;
     }
@@ -153,7 +156,7 @@ void DuelAudio_PollEvents(DuelAudioState *st, const DuelState *s,
     }
     if (!s->player.alive) st->loop_engine_p.active = 0;
     if (st->loop_engine_p.active) {
-        float g = G_ENGINE * (0.35f + 0.65f * s->player.throttle);
+        float g = G_ENGINE * (0.35f + 0.65f * s->player.throttle) * st->vol_sfx;
         st->loop_engine_p.step = (double)st->engine_player.rate /
                                  (double)DUEL_AUDIO_RATE *
                                  (0.92 + 0.16 * s->player.throttle);
@@ -182,7 +185,7 @@ void DuelAudio_PollEvents(DuelAudioState *st, const DuelState *s,
         }
         DuelVec3 d = duel_v3_sub(tp, lis.pos);
         float dist = duel_v3_len(d);
-        float g = G_TIE_ENG * duel_audio_atten(dist, R_TIE_ENG);
+        float g = G_TIE_ENG * duel_audio_atten(dist, R_TIE_ENG) * st->vol_sfx;
         float l = 0.7071f, r = 0.7071f;
         if (dist > 1e-3f) {
             float x = duel_v3_dot(duel_v3_scale(d, 1.0f / dist), lis.right);
@@ -203,7 +206,7 @@ void DuelAudio_PollEvents(DuelAudioState *st, const DuelState *s,
     }
     /* Ducking: throttle up => engines roar, music steps back. */
     if (st->loop_music.active) {
-        float g = G_MUSIC * (1.0f - (1.0f - DUCK_DEPTH) *
+        float g = st->vol_music * (1.0f - (1.0f - DUCK_DEPTH) *
                                        (s->player.alive ? s->player.throttle : 0.0f));
         st->loop_music.lgain = st->loop_music.rgain = g;
     }
@@ -260,8 +263,8 @@ void DuelAudio_MixChunk(DuelAudioState *st, float *out, unsigned frames) {
     if (st->loop_music.active) mix_voice(&st->loop_music, out, frames);
 }
 
-void DuelAudio_NormalizeChunk(float *out, unsigned frames) {
-    float k = DUEL_AUDIO_MASTER / 32768.0f;
+void DuelAudio_NormalizeChunk(float *out, unsigned frames, float master) {
+    float k = master / 32768.0f;
     for (unsigned i = 0; i < frames * 2u; i++) {
         float v = out[i] * k;
         if (v > 1.0f) v = 1.0f;

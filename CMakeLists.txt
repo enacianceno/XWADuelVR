@@ -20,7 +20,10 @@ add_library(XWADuelVR SHARED
     src/duel_xr.c
     src/duel_input.c
     src/duel_hands.c
-    src/duel_render.c)
+    src/duel_render.c
+    src/duel_font.c
+    src/duel_menu.c
+    src/duel_profile.c)
 target_compile_definitions(XWADuelVR PRIVATE SDL_MAIN_AVAILABLE)
 target_include_directories(XWADuelVR PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/src"

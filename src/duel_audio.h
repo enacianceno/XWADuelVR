@@ -71,6 +71,8 @@ typedef struct DuelAudioState {
     int last_alive_p, last_alive_t[DUEL_TIE_COUNT], last_alive_a[DUEL_ALLY_COUNT];
     float warn_cd;
     int ready; /* set once sounds are loaded */
+    /* M7 menu volumes (init = the frozen #define mix). */
+    float vol_master, vol_music, vol_sfx;
 } DuelAudioState;
 
 /* ---- pure math (unit-tested) ---- */
@@ -103,6 +105,8 @@ DuelAudio *DuelAudio_Create(const char *audio_dir);
 void DuelAudio_Update(DuelAudio *a, const DuelState *s, DuelListener lis,
                       float dt);
 void DuelAudio_Destroy(DuelAudio *a);
+/* M7 menu: live volumes (clamped 0..1; music default is the mix value). */
+void DuelAudio_SetVolumes(DuelAudio *a, float master, float music, float sfx);
 
 /* ---- core (duel_audio_core.c, SDL-free) ---- */
 void DuelAudio_InitState(DuelAudioState *st);
@@ -112,7 +116,7 @@ void DuelAudio_PollEvents(DuelAudioState *st, const DuelState *s,
  * frames*2 floats, zeroed by caller... actually ADDS into out). */
 void DuelAudio_MixChunk(DuelAudioState *st, float *out, unsigned frames);
 /* Map a mixed S16-scale chunk to F32 +-1.0 (master gain included). */
-void DuelAudio_NormalizeChunk(float *out, unsigned frames);
+void DuelAudio_NormalizeChunk(float *out, unsigned frames, float master);
 /* In-place loop crossfade: blends the tail into a copy of the head so a
  * loop wraps seamlessly (call once at load for loop sounds). */
 void DuelAudio_LoopBlend(int16_t *pcm, unsigned frames, int ch, unsigned x);

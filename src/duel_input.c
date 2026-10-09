@@ -6,7 +6,7 @@
 
 #include "flight_config.h"
 
-enum { A_LSTICK = 0, A_RSTICK, A_RTRIGGER, A_LTRIGGER, A_COUNT };
+enum { A_LSTICK = 0, A_RSTICK, A_RTRIGGER, A_LTRIGGER, A_MENUBTN, A_COUNT };
 
 static XrInstance s_instance = XR_NULL_HANDLE;
 static XrSession s_session = XR_NULL_HANDLE;
@@ -15,6 +15,7 @@ static XrAction s_actions[A_COUNT];
 static PFN_xrSyncActions s_sync = NULL;
 static PFN_xrGetActionStateFloat s_getFloat = NULL;
 static PFN_xrGetActionStateVector2f s_getVec = NULL;
+static PFN_xrGetActionStateBoolean s_getBool = NULL;
 static PFN_xrDestroyActionSet s_destroySet = NULL;
 
 static float s_throttle = 0.5f;
@@ -49,6 +50,7 @@ int DuelInput_Init(XrInstance instance, XrSession session) {
     LOAD(s_sync, xrSyncActions);
     LOAD(s_getFloat, xrGetActionStateFloat);
     LOAD(s_getVec, xrGetActionStateVector2f);
+    LOAD(s_getBool, xrGetActionStateBoolean);
 #undef LOAD
 
     XrActionSetCreateInfo sci;
@@ -58,12 +60,13 @@ int DuelInput_Init(XrInstance instance, XrSession session) {
     SDL_strlcpy(sci.localizedActionSetName, "Duel flight", sizeof sci.localizedActionSetName);
     if (!check(create_set(instance, &sci, &s_set), "xrCreateActionSet")) return 0;
 
-    static const char *names[A_COUNT] = { "lstick", "rstick", "rtrigger", "ltrigger" };
+    static const char *names[A_COUNT] = { "lstick", "rstick", "rtrigger", "ltrigger", "menubtn" };
     static const char *paths[A_COUNT] = {
         "/user/hand/left/input/thumbstick",
         "/user/hand/right/input/thumbstick",
         "/user/hand/right/input/trigger/value",
         "/user/hand/left/input/trigger/value",
+        "/user/hand/left/input/menu/click",
     };
     XrActionSuggestedBinding bindings[A_COUNT];
     memset(bindings, 0, sizeof bindings);
@@ -71,7 +74,8 @@ int DuelInput_Init(XrInstance instance, XrSession session) {
         XrActionCreateInfo ci;
         memset(&ci, 0, sizeof ci);
         ci.type = XR_TYPE_ACTION_CREATE_INFO;
-        ci.actionType = i < A_RTRIGGER ? XR_ACTION_TYPE_VECTOR2F_INPUT : XR_ACTION_TYPE_FLOAT_INPUT;
+        ci.actionType = i < A_RTRIGGER ? XR_ACTION_TYPE_VECTOR2F_INPUT
+            : i == A_MENUBTN ? XR_ACTION_TYPE_BOOLEAN_INPUT : XR_ACTION_TYPE_FLOAT_INPUT;
         SDL_strlcpy(ci.actionName, names[i], sizeof ci.actionName);
         SDL_strlcpy(ci.localizedActionName, names[i], sizeof ci.localizedActionName);
         if (!check(create_action(s_set, &ci, &s_actions[i]), "xrCreateAction")) return 0;
@@ -92,7 +96,7 @@ int DuelInput_Init(XrInstance instance, XrSession session) {
     ai.countActionSets = 1;
     ai.actionSets = &s_set;
     if (!check(attach(session, &ai), "attach")) return 0;
-    SDL_Log("DUEL input ready (oculus touch: sticks+triggers)");
+    SDL_Log("DUEL input ready (oculus touch: sticks+triggers+menubtn)");
     return 1;
 }
 
@@ -111,6 +115,7 @@ int DuelInput_Poll(DuelInput *out, float dt, XrTime display_time) {
     if (s_sync(s_session, &si) == XR_SESSION_NOT_FOCUSED) { s_armed = 0; return 0; }
 
     float lx = 0, ly = 0, rx = 0, ry = 0, rt = 0;
+    int mb = 0;
     for (int i = 0; i < A_COUNT; i++) {
         XrActionStateGetInfo gi;
         memset(&gi, 0, sizeof gi);
@@ -124,6 +129,12 @@ int DuelInput_Poll(DuelInput *out, float dt, XrTime display_time) {
                 if (i == A_LSTICK) { lx = st.currentState.x; ly = st.currentState.y; }
                 else { rx = st.currentState.x; ry = st.currentState.y; }
             }
+        } else if (i == A_MENUBTN) {
+            XrActionStateBoolean st;
+            memset(&st, 0, sizeof st);
+            st.type = XR_TYPE_ACTION_STATE_BOOLEAN;
+            if (s_getBool(s_session, &gi, &st) == XR_SUCCESS && st.isActive)
+                mb = st.currentState ? 1 : 0;
         } else {
             XrActionStateFloat st;
             memset(&st, 0, sizeof st);
@@ -133,6 +144,7 @@ int DuelInput_Poll(DuelInput *out, float dt, XrTime display_time) {
             }
         }
     }
+    out->menu = mb; /* M7: level; main edge-detects (never armed-gated) */
     /* Arming: require neutral sticks + released trigger (M8 semantics). */
     int neutral = fabsf(lx) < DUEL_DEADZONE && fabsf(ly) < DUEL_DEADZONE &&
                   fabsf(rx) < DUEL_DEADZONE && fabsf(ry) < DUEL_DEADZONE && rt < DUEL_TRIGGER_FIRE_OFF;

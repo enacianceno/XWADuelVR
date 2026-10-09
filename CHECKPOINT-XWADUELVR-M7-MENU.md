@@ -1,8 +1,8 @@
-# M7 COMBAT-SIMULATION BASE (menú + pilotos + opciones) — ETAPA 1
+# M7 COMBAT-SIMULATION BASE (menú + pilotos + opciones) — ETAPAS 1-3
 
-Date: 2026-10-09. Status: STAGE 1 COMPLETE (preservación + auditoría +
-propuesta). No se migró ni renombró nada. Milestone NO validado
-físicamente: stages 2-4 pendientes.
+Date: 2026-10-09. Status: STAGES 1-3 COMPLETE (código + tests + APK).
+Stage 4 (validación física) PENDIENTE: milestone NO validado en visor.
+Repo: commit inicial `2a33a12` + commit M7 (ver §12).
 
 Contexto: el usuario aprobó M6 ("milleston aprobado, ahora si es un
 juego") y ordenó convertir XWADuelVR en la base jugable de XWAQuest
@@ -198,5 +198,89 @@ no los cablea a la sim, NO se muestra el selector.
 - Sin regresión M6 (vuelo, manos, agarres, disparo, mapeo).
 
 ## Next step
-UNO: pedir autorización para (a) commit inicial del árbol
-DuelVR y (b) arrancar stage 2 (menú + ciclo de duelo).
+UNO (2026-10-09): validación física en Quest del APK M7 (§10-11):
+menú → duelo → pausa → resultado → repetir/volver, pilotos,
+cierre/reapertura. Sin regresión M6.
+
+---
+
+## 10. Stage 2/3 implementado (2026-10-09, código)
+
+Decisión de texto: STROKE FONT (no bitmap atlas): `src/duel_font.*`,
+glifos CAPS-ASCII 5x7 como segmentos por el pipe dyn-line
+existente. Cero assets, cero licencias, nítido en VR.
+
+Módulos nuevos:
+- `duel_font.*`: `DuelFont_Glyph`/`TextW`, set A-Z 0-9 `%:*.-+/() `
+  `!?'-_<>=*`, minúsculas pliegan a mayúsculas.
+- `duel_menu.*`: estados MENU/BRIEF/OPTIONS/PILOTS/COMBAT/PAUSED/
+  RESULT; filas ACTION/CHOICE/SLIDER/LABEL; layout panel-local;
+  `Nav`/`Adjust`/`ActivateRow`/`SetSlider`/`RowValue`.
+- `duel_profile.*`: `duel_prefs.cfg` + `pilot_<NOMBRE>.cfg`
+  (perfil NATIVO DuelVR, no piloto XWA); `Scan`/`Record`/`Delete`.
+
+Pantallas: MENU (Combat Simulation, Piloto, Opciones, Salir),
+BRIEF (X-Wing vs 3 TIE + 2 aliados, dificultad, Iniciar),
+OPTIONS (volumen/música/efectos, sensibilidad 0.5-1.5,
+zona muerta 0.05-0.30, recentrar), PILOTS (elegir/crear
+PILOTO<n>/eliminar, stats V/D/bajas), PAUSED
+(reanudar/reiniciar/opciones/menú), RESULT (victoria/derrota,
+bajas, repetir/menú). Strings CAPS-ASCII español.
+
+Render (`duel_render.c`): panel world-locked (colocado 1 vez por
+pantalla, 1.1 m al frente, yaw de cabeza; NUNCA persigue).
+Dos slices puros: tris (fondo/filas/sliders/borde) + líneas
+(glifos + rayos de manos). Hover = pinch target; pausa conserva
+HUD de combate, resto de pantallas lo oculta.
+
+Input menú: manos = rayo + pinch (drag en sliders);
+controllers = stick (nav/ajuste) + trigger/menu (activar).
+Vuelo y menú SEPARADOS: publish de manos + `Duel_Update` solo
+en COMBAT; al entrar a combate se exige soltar el fuego y
+`ClearGrabs` exige re-agarre fresco.
+
+Main (`duel_main.c`): pausa con botón menu + auto-pausa al
+perder foco XR (`HasFocus`); sim congelada fuera de COMBAT
+(render/tracking vivos); fin de combate detectado en el flanco
+DESTROYED→COMBAT del auto-reset (conserva el beat de explosión
+~2.5 s con input neutral); resultado registrado UNA vez por
+combate (reiniciar/abandonar no registra).
+
+Sim/audio (`duel_sim.*`, `duel_audio*`): dificultad 0/1/2 =
+multiplicadores TIE HP 0.7/1.0/1.3, vel, giro, cadencia
+(piloto = baseline M6 intacto, sobrevive resets); volúmenes
+master/música/sfx en runtime; sens/deadzone aplicados a
+sticks + manos (`SetHandDead`, `SetHandSens`).
+
+Pendiente explícito: nombre de piloto a elegir (crear usa
+PILOTO<n> auto; teclado VR diferido); pausa solo-manos sin
+gesto (requiere controller); sin campaña/hangar/cuerpo piloto.
+
+## 11. Pruebas + APK M7 (2026-10-09)
+
+- CPU en Quest (`/data/local/tmp/test_duel_m7`): ALL DUEL TESTS
+  PASS (99 tests: 91 previos + 8 M7: font/menu/values/strings/
+  prefs/pilot/scan/difficulty).
+- Reglas render (`test_render_rules.py`): 128/128 PASS
+  (+7 M7: slices puros, sim solo en combate, resultado único,
+  pausa+foco, re-agarre, baseline dificultad).
+- Build: `Build-Target.ps1` + `gradlew assembleDebug --offline
+  -x lint` → BUILD SUCCESSFUL. OJO: el primer APK salió con
+  .so viejo (M6); se reconstruyó tras el nativo.
+- APK: `XWADuelVR-M7-MENU-debug.apk`, v3.7-M7-menu,
+  2408785 bytes,
+  SHA-256 `68E346D8D2EC47097C9860297E3B18F8A63F506566F48630CC86785500C98E7B`.
+  Instalado con `install -r` en 3487C10H9T0BKZ.
+- Smoke adb: SIN crash (sin FATAL/SIGSEGV); arranque por
+  `am start` falla limpio con `SESSION_NOT_READY` (-28, sin
+  HMD/foco) — ambiental, igual que M6; el usuario lanza
+  desde el visor.
+- M6 preservado: `XWADuelVR-M6-AXISSPLIT-debug.apk` intacto
+  (reinstalable si M7 regresa).
+
+## 12. Git
+
+- `2a33a12` M6 approved baseline (commit inicial).
+- Commit M7 (stage 2/3): 15 modificados + 6 nuevos
+  (`duel_font/menu/profile.*`), ~1100 inserciones.
+  XWAQuest y demás proyectos: intactos, read-only.

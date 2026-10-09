@@ -3,15 +3,29 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "duel_audio.h"
 #include "duel_input.h"
 #include "duel_math.h"
+#include "duel_menu.h"
+#include "duel_profile.h"
 #include "duel_render.h"
 #include "duel_sim.h"
 #include "duel_xr.h"
+
+/* M7 options: deadzone then sensitivity gain on a -1..1 axis. */
+static float duel_shape_axis(float v, float dead, float sens) {
+    float a = fabsf(v);
+    float s, g;
+    if (a < dead) return 0.0f;
+    s = (a - dead) / (1.0f - dead);
+    g = s * sens;
+    if (g > 1.0f) g = 1.0f;
+    return (v < 0.0f) ? -g : g;
+}
 
 int SDL_main(int argc, char **argv) {
     (void)argc;
@@ -36,10 +50,12 @@ int SDL_main(int argc, char **argv) {
         return 1;
     }
     char asset_dir[512];
+    char prof_dir[512]; /* M7: prefs + pilots live in the files root */
     {
         const char *internal = SDL_GetAndroidInternalStoragePath();
         if (!internal) internal = "/data/user/0/org.openxwa.xwaduellvr/files";
         snprintf(asset_dir, sizeof asset_dir, "%s/duel_assets", internal);
+        snprintf(prof_dir, sizeof prof_dir, "%s", internal);
     }
     SDL_Log("DUEL assets: %s", asset_dir);
     DuelRender *render =
@@ -60,12 +76,53 @@ int SDL_main(int argc, char **argv) {
         snprintf(adir, sizeof(adir), "%s/audio", asset_dir);
         audio = DuelAudio_Create(adir);
     }
+    /* M7 menu boot: prefs + pilot restore (close/reopen persistence). */
+    DuelMenu menu;
+    DuelPrefs prefs;
+    DuelMenu_Init(&menu);
+    DuelPrefs_Load(&prefs, prof_dir);
+    menu.vol_master = prefs.vol_master;
+    menu.vol_music = prefs.vol_music;
+    menu.vol_sfx = prefs.vol_sfx;
+    menu.sens = prefs.sens;
+    menu.dead = prefs.dead;
+    menu.npilots = DuelPilot_Scan(prof_dir, menu.pilot_names, DUEL_PILOT_MAX);
+    menu.pilot_idx = -1;
+    {
+        int i;
+        for (i = 0; i < menu.npilots; i++) {
+            if (!strcmp(menu.pilot_names[i], prefs.last_pilot)) {
+                menu.pilot_idx = i;
+                break;
+            }
+        }
+        if (menu.pilot_idx < 0 && menu.npilots > 0) menu.pilot_idx = 0;
+        if (menu.pilot_idx >= 0) {
+            DuelPilot_Load(&menu.pilot, prof_dir,
+                           menu.pilot_names[menu.pilot_idx]);
+            menu.difficulty = menu.pilot.last_diff;
+        }
+    }
+    DuelMenu_RefreshPilots(&menu);
+    if (audio)
+        DuelAudio_SetVolumes(audio, menu.vol_master, menu.vol_music,
+                             menu.vol_sfx);
+    SDL_Log("DUEL menu boot: pilots=%d sel=%d prefs=%s", menu.npilots,
+            menu.pilot_idx, prefs.last_pilot);
 
     Uint64 last_us = SDL_GetTicksNS() / 1000u;
     Uint64 stat_us = last_us;
     Uint64 ctrl_us = last_us; /* P0.5 §21: DUEL_CTRL 5 Hz gate */
     int frames = 0;
     int running = 1;
+    /* M7 menu/combat state machine edges + placement. */
+    int prev_menu_btn = 0, prev_fire = 0, prev_pinch = 0;
+    int nav_y = 0, nav_x = 0;
+    int panel_state = -1;
+    int need_fire_release = 0;
+    int was_focus = 1;
+    int prev_phase = DUEL_PHASE_COMBAT;
+    int combat_kills0 = 0;
     while (running && !DuelXr_ShouldQuit()) {
         DuelXr_PollEvents();
         SDL_Event ev;
@@ -101,34 +158,298 @@ int SDL_main(int argc, char **argv) {
             if (dt > 0.1f) dt = 0.1f;
             DuelInput in;
             DuelInput_Poll(&in, dt, display_time);
-            /* M3.2: a held hand owns the throttle (previous frame's grab);
-             * otherwise the stick integrator runs. */
-            {
-                float hv = 0.0f;
-                int ha = DuelRender_HandThrottle(render, &hv);
-                Duel_HandThrottle(&sim, ha, hv);
+            /* M7 options shape the flight axes (menu nav uses raw_*). */
+            in.yaw = duel_shape_axis(in.yaw, menu.dead, menu.sens);
+            in.pitch = duel_shape_axis(in.pitch, menu.dead, menu.sens);
+            in.roll = duel_shape_axis(in.roll, menu.dead, menu.sens);
+            in.thr_axis = duel_shape_axis(in.thr_axis, menu.dead, menu.sens);
+            Duel_SetHandDead(&sim, menu.dead);
+            DuelRender_SetHandSens(render, menu.sens);
+            int menu_edge = in.menu && !prev_menu_btn; prev_menu_btn = in.menu;
+            int fire_edge = in.fire && !prev_fire; prev_fire = in.fire;
+            /* M7 menu screens: panel placement (once per screen,
+             * world-locked) + hands ray/pinch + controller fallback. */
+            if (menu.state != DUEL_APP_COMBAT) {
+                float ov_m = menu.vol_master, ov_u = menu.vol_music;
+                float ov_s = menu.vol_sfx, ose = menu.sens, ode = menu.dead;
+                if (panel_state != (int)menu.state) {
+                    XrPosef hp = views[0].pose;
+                    DuelQuat hq = duel_q(hp.orientation.x, hp.orientation.y,
+                                         hp.orientation.z, hp.orientation.w);
+                    DuelVec3 hpos = duel_v3(
+                        (views[0].pose.position.x + views[1].pose.position.x) * 0.5f,
+                        (views[0].pose.position.y + views[1].pose.position.y) * 0.5f,
+                        (views[0].pose.position.z + views[1].pose.position.z) * 0.5f);
+                    DuelQuat pq = duel_q_axis_angle(duel_v3(0, 1, 0),
+                                                    duel_yaw_of(hq));
+                    DuelVec3 pc = duel_v3_add(hpos, duel_v3_scale(
+                        duel_q_forward(pq), 1.1f));
+                    pc.y = hpos.y;
+                    DuelRender_SetMenuPanel(render, 1, &menu, pc, pq);
+                    DuelRender_SetCombatHud(render,
+                        menu.state == DUEL_APP_PAUSED ? 1 : 0);
+                    DuelRender_ClearGrabs(render);
+                    panel_state = (int)menu.state;
+                    SDL_Log("DUEL menu screen=%d", (int)menu.state);
+                }
+                {
+                    int hov = -1, act = DUEL_ACT_NONE, arg = -1;
+                    float hx = 0.0f, hy = 0.0f;
+                    int pinch = DuelRender_MenuPointer(render, &hov, &hx, &hy);
+                    int click_row = -1;
+                    if (hov >= 0) menu.hover = hov;
+                    else if (!pinch) menu.hover = -1;
+                    /* Hand slider drag while pinched (level, not edge). */
+                    if (pinch && menu.hover >= 0) {
+                        DuelMenuRow rows[DUEL_MENU_MAXROWS];
+                        int n = DuelMenu_Rows(&menu, rows, DUEL_MENU_MAXROWS);
+                        if (menu.hover < n &&
+                                rows[menu.hover].kind == DUEL_ROW_SLIDER) {
+                            float x0, y0, x1, y1;
+                            if (DuelMenu_RowRect(&menu, menu.hover,
+                                                 &x0, &y0, &x1, &y1) &&
+                                    x1 > x0)
+                                DuelMenu_SetSlider(&menu, menu.hover,
+                                    (hx - x0) / (x1 - x0));
+                            menu.sel = menu.hover;
+                        } else if (!prev_pinch) {
+                            click_row = menu.hover;
+                        }
+                    }
+                    prev_pinch = pinch;
+                    /* Controller fallback: stick nav + trigger/menu. */
+                    {
+                        int ny = 0, nx = 0;
+                        if (in.raw_ly < -0.6f) ny = -1;
+                        else if (in.raw_ly > 0.6f) ny = 1;
+                        if (in.raw_lx > 0.6f || in.raw_rx > 0.6f) nx = 1;
+                        else if (in.raw_lx < -0.6f || in.raw_rx < -0.6f) nx = -1;
+                        if (ny && ny != nav_y) DuelMenu_Nav(&menu, ny);
+                        if (nx && nx != nav_x) DuelMenu_Adjust(&menu, nx);
+                        nav_y = ny;
+                        nav_x = nx;
+                        if ((fire_edge || menu_edge) && click_row < 0)
+                            click_row = menu.sel;
+                    }
+                    if (click_row >= 0) {
+                        arg = DuelMenu_RowArg(&menu, click_row);
+                        act = DuelMenu_ActivateRow(&menu, click_row);
+                        menu.sel = click_row;
+                    }
+                    switch (act) {
+                    case DUEL_ACT_ENTER_BRIEF:
+                        DuelMenu_SetState(&menu, DUEL_APP_BRIEF);
+                        break;
+                    case DUEL_ACT_ENTER_OPTIONS:
+                        menu.options_from = menu.state;
+                        DuelMenu_SetState(&menu, DUEL_APP_OPTIONS);
+                        break;
+                    case DUEL_ACT_ENTER_PILOTS:
+                        DuelMenu_SetState(&menu, DUEL_APP_PILOTS);
+                        break;
+                    case DUEL_ACT_BACK:
+                        DuelMenu_SetState(&menu, menu.state == DUEL_APP_OPTIONS ?
+                            menu.options_from : DUEL_APP_MENU);
+                        break;
+                    case DUEL_ACT_START:
+                    case DUEL_ACT_RESTART:
+                    case DUEL_ACT_REPEAT:
+                        Duel_ResetCombat(&sim);
+                        Duel_SetDifficulty(&sim, menu.difficulty);
+                        DuelRender_ClearGrabs(render);
+                        DuelMenu_SetState(&menu, DUEL_APP_COMBAT);
+                        DuelRender_SetMenuPanel(render, 0, NULL,
+                            duel_v3(0, 0, 0), duel_q_identity());
+                        panel_state = -1;
+                        combat_kills0 = sim.kills_player;
+                        need_fire_release = 1;
+                        prev_phase = DUEL_PHASE_COMBAT;
+                        SDL_Log("DUEL combat start diff=%d pilot=%s",
+                                menu.difficulty, menu.pilot.name);
+                        break;
+                    case DUEL_ACT_RESUME:
+                        DuelMenu_SetState(&menu, DUEL_APP_COMBAT);
+                        DuelRender_SetMenuPanel(render, 0, NULL,
+                            duel_v3(0, 0, 0), duel_q_identity());
+                        panel_state = -1;
+                        DuelRender_ClearGrabs(render);
+                        need_fire_release = 1;
+                        break;
+                    case DUEL_ACT_QUIT_TO_MENU:
+                        DuelMenu_SetState(&menu, DUEL_APP_MENU);
+                        DuelRender_ClearGrabs(render);
+                        break;
+                    case DUEL_ACT_RECENTER:
+                        DuelRender_RequestRecenter(render);
+                        break;
+                    case DUEL_ACT_EXIT_APP:
+                        running = 0;
+                        break;
+                    case DUEL_ACT_SELECT_PILOT:
+                        if (arg >= 0 && arg < menu.npilots) {
+                            menu.pilot_idx = arg;
+                            DuelPilot_Load(&menu.pilot, prof_dir,
+                                           menu.pilot_names[arg]);
+                            DuelMenu_RefreshPilots(&menu);
+                            snprintf(prefs.last_pilot,
+                                     sizeof(prefs.last_pilot), "%s",
+                                     menu.pilot_names[arg]);
+                            DuelPrefs_Save(&prefs, prof_dir);
+                        }
+                        break;
+                    case DUEL_ACT_NEW_PILOT:
+                        if (menu.npilots < DUEL_PILOT_MAX) {
+                            char nm[DUEL_PILOT_NAME_MAX + 1];
+                            int t, u, free;
+                            for (t = 1; t <= DUEL_PILOT_MAX; t++) {
+                                snprintf(nm, sizeof(nm), "PILOTO%d", t);
+                                free = 1;
+                                for (u = 0; u < menu.npilots; u++) {
+                                    if (!strcmp(menu.pilot_names[u], nm)) {
+                                        free = 0;
+                                        break;
+                                    }
+                                }
+                                if (free) break;
+                            }
+                            if (free) {
+                                DuelPilot np;
+                                DuelPilot_Defaults(&np, nm);
+                                if (DuelPilot_Save(&np, prof_dir)) {
+                                    menu.npilots = DuelPilot_Scan(prof_dir,
+                                        menu.pilot_names, DUEL_PILOT_MAX);
+                                    menu.pilot_idx = -1;
+                                    for (u = 0; u < menu.npilots; u++) {
+                                        if (!strcmp(menu.pilot_names[u], nm)) {
+                                            menu.pilot_idx = u;
+                                            break;
+                                        }
+                                    }
+                                    menu.pilot = np;
+                                    DuelMenu_RefreshPilots(&menu);
+                                    DuelMenu_SetState(&menu, DUEL_APP_PILOTS);
+                                    snprintf(prefs.last_pilot,
+                                             sizeof(prefs.last_pilot), "%s", nm);
+                                    DuelPrefs_Save(&prefs, prof_dir);
+                                }
+                            }
+                        }
+                        break;
+                    case DUEL_ACT_DELETE_PILOT:
+                        if (menu.pilot_idx >= 0 &&
+                                menu.pilot_idx < menu.npilots) {
+                            DuelPilot_Delete(prof_dir, menu.pilot_names[menu.pilot_idx]);
+                            menu.npilots = DuelPilot_Scan(prof_dir,
+                                menu.pilot_names, DUEL_PILOT_MAX);
+                            menu.pilot_idx =
+                                menu.npilots > 0 ? 0 : -1;
+                            if (menu.pilot_idx >= 0) {
+                                DuelPilot_Load(&menu.pilot, prof_dir,
+                                    menu.pilot_names[menu.pilot_idx]);
+                                snprintf(prefs.last_pilot,
+                                         sizeof(prefs.last_pilot), "%s",
+                                         menu.pilot_names[menu.pilot_idx]);
+                            } else {
+                                DuelPilot_Defaults(&menu.pilot, "");
+                                prefs.last_pilot[0] = '\0';
+                            }
+                            DuelMenu_RefreshPilots(&menu);
+                            DuelMenu_SetState(&menu, DUEL_APP_PILOTS);
+                            DuelPrefs_Save(&prefs, prof_dir);
+                        }
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                /* Prefs apply + persist on any change. */
+                if (ov_m != menu.vol_master || ov_u != menu.vol_music ||
+                        ov_s != menu.vol_sfx || ose != menu.sens ||
+                        ode != menu.dead) {
+                    prefs.vol_master = menu.vol_master;
+                    prefs.vol_music = menu.vol_music;
+                    prefs.vol_sfx = menu.vol_sfx;
+                    prefs.sens = menu.sens;
+                    prefs.dead = menu.dead;
+                    DuelPrefs_Save(&prefs, prof_dir);
+                    if (audio)
+                        DuelAudio_SetVolumes(audio, menu.vol_master,
+                                             menu.vol_music, menu.vol_sfx);
+                }
             }
-            /* M3.3: a held hand owns pitch/yaw (previous frame's
-             * deflection); otherwise the controller axes run. M6: the
-             * stick lateral is pure yaw; roll comes from the left
-             * lever (independent channel, both hands at once). */
-            {
-                float pd = 0.0f, rd = 0.0f;
-                int sa = DuelRender_HandStick(render, &pd, &rd);
-                Duel_HandStick(&sim, sa, pd, rd);
+            int in_combat_now = (menu.state == DUEL_APP_COMBAT);
+            if (in_combat_now &&
+                    (menu_edge || (!DuelXr_HasFocus() && was_focus))) {
+                if (!DuelXr_HasFocus())
+                    SDL_Log("DUEL auto-pause: XR focus lost");
+                DuelMenu_SetState(&menu, DUEL_APP_PAUSED);
+                DuelRender_ClearGrabs(render);
+                in_combat_now = 0;
             }
-            {
-                float ld = 0.0f;
-                int la = DuelRender_HandLever(render, &ld);
-                Duel_HandLever(&sim, la, ld);
-            }
-            /* M3.4: index trigger ORs with the controller trigger. The
-             * sim is untouched: fire cooldown/ownership live there. */
-            in.fire = in.fire || DuelRender_HandFire(render);
+            was_focus = DuelXr_HasFocus();
             DuelVec3 bF = duel_q_forward(sim.player.orient);
             DuelVec3 bU = duel_q_up(sim.player.orient);
             DuelVec3 bR = duel_q_right(sim.player.orient);
-            Duel_Update(&sim, &in, dt);
+            if (in_combat_now) {
+                /* M3.2: a held hand owns the throttle (previous frame's
+                 * grab); otherwise the stick integrator runs. */
+                {
+                    float hv = 0.0f;
+                    int ha = DuelRender_HandThrottle(render, &hv);
+                    Duel_HandThrottle(&sim, ha, hv);
+                }
+                /* M3.3/M6: hand stick + left lever publish. */
+                {
+                    float pd = 0.0f, rd = 0.0f;
+                    int sa = DuelRender_HandStick(render, &pd, &rd);
+                    Duel_HandStick(&sim, sa, pd, rd);
+                }
+                {
+                    float ld = 0.0f;
+                    int la = DuelRender_HandLever(render, &ld);
+                    Duel_HandLever(&sim, la, ld);
+                }
+                /* M3.4/M7: fire OR, gated until release after any
+                 * screen transition (no accidental first-frame shot). */
+                {
+                    int hf = DuelRender_HandFire(render);
+                    if (need_fire_release) {
+                        if (!in.fire && !hf) need_fire_release = 0;
+                        in.fire = 0;
+                    } else {
+                        in.fire = in.fire || hf;
+                    }
+                }
+                if (sim.phase == DUEL_PHASE_DESTROYED) {
+                    /* Destroyed beat: world animates, input neutral. */
+                    DuelInput neutral;
+                    memset(&neutral, 0, sizeof(neutral));
+                    Duel_Update(&sim, &neutral, dt);
+                } else {
+                    Duel_Update(&sim, &in, dt);
+                }
+                /* Sim auto-reset rebuilt the fight: freeze it, record
+                 * the result ONCE, show the RESULT screen. */
+                if (prev_phase == DUEL_PHASE_DESTROYED &&
+                        sim.phase == DUEL_PHASE_COMBAT) {
+                    int win = sim.player.alive ? 1 : 0;
+                    int kills = sim.kills_player - combat_kills0;
+                    menu.result_win = win;
+                    menu.result_kills = kills < 0 ? 0 : kills;
+                    if (menu.pilot_idx >= 0) {
+                        DuelPilot_Record(&menu.pilot, win,
+                                         menu.result_kills, menu.difficulty);
+                        DuelPilot_Save(&menu.pilot, prof_dir);
+                        DuelMenu_RefreshPilots(&menu);
+                    }
+                    DuelMenu_SetState(&menu, DUEL_APP_RESULT);
+                    DuelRender_ClearGrabs(render);
+                    SDL_Log("DUEL result: %s kills=%d pilot=%s",
+                            win ? "VICTORIA" : "DERROTA",
+                            menu.result_kills, menu.pilot.name);
+                }
+                prev_phase = sim.phase;
+            }
             /* P0.5 §21: stick-active control telemetry (5 Hz max). Tells A
              * (bad raw) from B (bad mapping) from C (bad ship basis) from
              * E (calibration recaptured: generation jumps). D (camera math)
@@ -137,7 +458,7 @@ int SDL_main(int argc, char **argv) {
             if (fabsf(in.raw_ly) > stick_mag) stick_mag = fabsf(in.raw_ly);
             if (fabsf(in.raw_rx) > stick_mag) stick_mag = fabsf(in.raw_rx);
             if (fabsf(in.raw_ry) > stick_mag) stick_mag = fabsf(in.raw_ry);
-            if (stick_mag > 0.25f && now_us - ctrl_us >= 200000u) {
+            if (in_combat_now && stick_mag > 0.25f && now_us - ctrl_us >= 200000u) {
                 ctrl_us = now_us;
                 DuelVec3 aF = duel_q_forward(sim.player.orient);
                 DuelVec3 aU = duel_q_up(sim.player.orient);

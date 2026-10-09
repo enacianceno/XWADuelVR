@@ -52,6 +52,16 @@ int DuelRender_HandThrottle(const DuelRender *r, float *value);
 int DuelRender_HandStick(const DuelRender *r, float *pd, float *rd);
 /* M6: 1 + roll while the left lever is held (or spring settles). */
 int DuelRender_HandLever(const DuelRender *r, float *ld);
+/* M7: hand-lever sensitivity (clamped 0.5..1.5, default 1.0). */
+void DuelRender_SetHandSens(DuelRender *r, float sens);
+/* M7 menu panel + interaction (main-owned DuelMenu, see duel_menu.h). */
+#include "duel_menu.h"
+void DuelRender_SetMenuPanel(DuelRender *r, int show, const DuelMenu *m,
+                             DuelVec3 center, DuelQuat quat);
+void DuelRender_SetCombatHud(DuelRender *r, int show);
+void DuelRender_ClearGrabs(DuelRender *r);
+void DuelRender_RequestRecenter(DuelRender *r);
+int DuelRender_MenuPointer(const DuelRender *r, int *row, float *x, float *y);
 
 /* M3.4: 1 while the right index trigger is pulled, else 0. */
 int DuelRender_HandFire(const DuelRender *r);

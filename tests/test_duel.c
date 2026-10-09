@@ -8,9 +8,12 @@
 
 #include "duel_audio.h"
 #include "duel_depth.h"
+#include "duel_font.h"
 #include "duel_hands.h"
 #include "duel_math.h"
+#include "duel_menu.h"
 #include "duel_motion.h"
+#include "duel_profile.h"
 #include "duel_sim.h"
 #include "duel_sky.h"
 #include "duel_sprite.h"
@@ -1359,7 +1362,7 @@ static void test_audio_output(void) {
     /* F32 bus: S16-scale sums map into +-1.0 (the engine-clip fix). */
     float out[8] = { 32768.0f, -32768.0f, 1000.0f, -1000.0f,
                      100000.0f, -100000.0f, 0.0f, 0.0f };
-    DuelAudio_NormalizeChunk(out, 4);
+    DuelAudio_NormalizeChunk(out, 4, DUEL_AUDIO_MASTER);
     EXPECT_NEAR(out[0], 0.8f, 1e-6f);
     EXPECT_NEAR(out[1], -0.8f, 1e-6f);
     EXPECT_NEAR(out[2], 1000.0f * 0.8f / 32768.0f, 1e-6f);
@@ -2682,6 +2685,268 @@ static void test_stick_rel(void) {
     printf("stick_rel ok\n");
 }
 
+/* M7: stroke font coverage (menu charset must render, nothing asserts
+ * on exact segment art). */
+static void test_font_glyphs(void) {
+    static const char *set =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789%:*.-+/() ";
+    int i;
+    DuelFontSeg segs[DUEL_FONT_MAXSEGS];
+    for (i = 0; set[i]; i++) {
+        int n = DuelFont_Glyph(set[i], segs, DUEL_FONT_MAXSEGS);
+        if (set[i] == ' ') { EXPECT(n == 0); continue; }
+        EXPECT(n > 0);
+        EXPECT(n <= DUEL_FONT_MAXSEGS);
+    }
+    /* Lowercase folds to the same glyph as uppercase. */
+    {
+        DuelFontSeg a[DUEL_FONT_MAXSEGS], b[DUEL_FONT_MAXSEGS];
+        int na = DuelFont_Glyph('a', a, DUEL_FONT_MAXSEGS);
+        int nb = DuelFont_Glyph('A', b, DUEL_FONT_MAXSEGS);
+        EXPECT(na == nb && na > 0);
+        EXPECT(!memcmp(a, b, (size_t)na * sizeof(a[0])));
+    }
+    EXPECT(DuelFont_Glyph('#', segs, DUEL_FONT_MAXSEGS) == 0);
+    EXPECT_NEAR(DuelFont_TextW("AB"), 2.0f * DUEL_FONT_ADV - 1.0f, 1e-6f);
+    EXPECT_NEAR(DuelFont_TextW(""), 0.0f, 1e-6f);
+    printf("font_glyphs ok\n");
+}
+
+/* M7: every static menu string must be renderable by the font. */
+static void test_menu_strings(void) {
+    static const DuelAppState states[] = {
+        DUEL_APP_MENU, DUEL_APP_BRIEF, DUEL_APP_OPTIONS,
+        DUEL_APP_PILOTS, DUEL_APP_PAUSED, DUEL_APP_RESULT
+    };
+    size_t s;
+    DuelFontSeg segs[DUEL_FONT_MAXSEGS];
+    for (s = 0; s < sizeof(states) / sizeof(states[0]); s++) {
+        DuelMenu m;
+        DuelMenuRow rows[DUEL_MENU_MAXROWS];
+        int n, i;
+        DuelMenu_Init(&m);
+        DuelMenu_SetState(&m, states[s]);
+        n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+        EXPECT(n > 0 && n <= DUEL_MENU_MAXROWS);
+        {
+            const char *t = DuelMenu_Title(&m);
+            int c;
+            EXPECT(t != NULL);
+            for (c = 0; t[c]; c++) {
+                if (t[c] == ' ') continue;
+                EXPECT(DuelFont_Glyph(t[c], segs, DUEL_FONT_MAXSEGS) > 0);
+            }
+        }
+        for (i = 0; i < n; i++) {
+            int c;
+            EXPECT(rows[i].label != NULL);
+            for (c = 0; rows[i].label[c]; c++) {
+                char ch = rows[i].label[c];
+                if (ch == ' ') continue;
+                EXPECT(DuelFont_Glyph(ch, segs, DUEL_FONT_MAXSEGS) > 0);
+            }
+        }
+    }
+    printf("menu_strings ok\n");
+}
+
+/* M7: menu layout/nav/activate/choice/slider behavior. */
+static void test_menu_rows(void) {
+    DuelMenu m;
+    DuelMenuRow rows[DUEL_MENU_MAXROWS];
+    int n, i;
+    DuelMenu_Init(&m);
+    /* MENU: 4 actions, selection lands on the first. */
+    n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+    EXPECT(n == 4);
+    EXPECT(m.state == DUEL_APP_MENU && m.sel == 0);
+    EXPECT(DuelMenu_Activate(&m) == DUEL_ACT_ENTER_BRIEF);
+    DuelMenu_Nav(&m, 1); EXPECT(m.sel == 1);
+    EXPECT(DuelMenu_Activate(&m) == DUEL_ACT_ENTER_PILOTS);
+    DuelMenu_Nav(&m, -1); EXPECT(m.sel == 0);
+    DuelMenu_Nav(&m, -1); EXPECT(m.sel == 3); /* wrap */
+    /* BRIEF: labels skipped by nav + rect/hit. */
+    DuelMenu_SetState(&m, DUEL_APP_BRIEF);
+    n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+    EXPECT(n == 6);
+    EXPECT(m.sel == 3); /* DIFICULTAD choice */
+    {
+        float x0, y0, x1, y1;
+        EXPECT(!DuelMenu_RowRect(&m, 0, &x0, &y0, &x1, &y1)); /* label */
+        EXPECT(DuelMenu_RowRect(&m, 3, &x0, &y0, &x1, &y1));
+        EXPECT(x1 > x0 && y1 > y0);
+        EXPECT(DuelMenu_HitRow(&m, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f) == 3);
+        EXPECT(DuelMenu_HitRow(&m, 99.0f, 99.0f) == -1);
+        /* Rects stack downward without overlap. */
+        for (i = 3; i < n - 1; i++) {
+            float a0, a1, b0, b1, t;
+            DuelMenu_RowRect(&m, i, &a0, &t, &a1, &t);
+            DuelMenu_RowRect(&m, i, NULL, &b0, NULL, &b1);
+            (void)a0; (void)a1;
+            {
+                float c0, c1;
+                DuelMenu_RowRect(&m, i + 1, NULL, &c0, NULL, &c1);
+                EXPECT(b0 >= c1); /* this row fully above the next */
+            }
+        }
+    }
+    /* Choice click cycles with wraparound. */
+    EXPECT(m.difficulty == DUEL_DIFF_PILOT);
+    EXPECT(DuelMenu_ActivateRow(&m, 3) == DUEL_ACT_NONE);
+    EXPECT(m.difficulty == DUEL_DIFF_ACE);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.difficulty == DUEL_DIFF_ROOKIE);
+    DuelMenu_Adjust(&m, -1);
+    EXPECT(m.difficulty == DUEL_DIFF_ACE);
+    EXPECT(DuelMenu_ActivateRow(&m, 4) == DUEL_ACT_START);
+    /* OPTIONS sliders: drag + step clamp. */
+    DuelMenu_SetState(&m, DUEL_APP_OPTIONS);
+    DuelMenu_SetSlider(&m, 0, 0.5f);
+    EXPECT_NEAR(m.vol_master, 0.5f, 1e-6f);
+    DuelMenu_SetSlider(&m, 0, 9.0f);
+    EXPECT_NEAR(m.vol_master, 1.0f, 1e-6f);
+    DuelMenu_SetSlider(&m, 3, 0.0f);
+    EXPECT_NEAR(m.sens, 0.5f, 1e-6f);
+    DuelMenu_SetSlider(&m, 4, 1.0f);
+    EXPECT_NEAR(m.dead, 0.30f, 1e-6f);
+    m.sel = 0;
+    m.vol_master = 0.95f;
+    DuelMenu_Adjust(&m, 1);
+    EXPECT_NEAR(m.vol_master, 1.0f, 1e-6f);
+    /* Activate on label/out-of-range is a no-op. */
+    EXPECT(DuelMenu_ActivateRow(&m, 99) == DUEL_ACT_NONE);
+    DuelMenu_SetState(&m, DUEL_APP_BRIEF);
+    EXPECT(DuelMenu_ActivateRow(&m, 0) == DUEL_ACT_NONE);
+    printf("menu_rows ok\n");
+}
+
+/* M7: row values (choice name, slider %, pilot name). */
+static void test_menu_values(void) {
+    DuelMenu m;
+    char val[16];
+    DuelMenu_Init(&m);
+    DuelMenu_SetState(&m, DUEL_APP_BRIEF);
+    m.difficulty = DUEL_DIFF_ROOKIE;
+    DuelMenu_RowValue(&m, 3, val, sizeof(val));
+    EXPECT(!strcmp(val, "FACIL"));
+    DuelMenu_SetState(&m, DUEL_APP_OPTIONS);
+    m.vol_master = 0.8f;
+    DuelMenu_RowValue(&m, 0, val, sizeof(val));
+    EXPECT(!strcmp(val, "80%"));
+    m.sens = 1.0f;
+    DuelMenu_RowValue(&m, 3, val, sizeof(val));
+    EXPECT(!strcmp(val, "50%"));
+    DuelMenu_SetState(&m, DUEL_APP_MENU);
+    strcpy(m.pilot.name, "ACE");
+    m.pilot_idx = 0;
+    DuelMenu_RowValue(&m, 1, val, sizeof(val)); /* PILOTO row */
+    EXPECT(!strcmp(val, "ACE"));
+    m.pilot_idx = -1;
+    m.pilot.name[0] = '\0';
+    DuelMenu_RowValue(&m, 1, val, sizeof(val));
+    EXPECT(!strcmp(val, "-"));
+    printf("menu_values ok\n");
+}
+
+#define DUEL_TEST_PROFDIR "/data/local/tmp/duel_test_prof"
+
+/* M7: prefs close/reopen persistence + tolerant reader. */
+static void test_prefs_roundtrip(void) {
+    DuelPrefs p, q;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "mkdir -p %s", DUEL_TEST_PROFDIR);
+    EXPECT(system(cmd) == 0);
+    DuelPrefs_Defaults(&p);
+    EXPECT_NEAR(p.sens, 1.0f, 1e-6f);
+    EXPECT_NEAR(p.dead, 0.15f, 1e-6f);
+    EXPECT(p.last_pilot[0] == '\0');
+    p.vol_master = 0.33f; p.sens = 1.4f; p.dead = 0.22f;
+    strcpy(p.last_pilot, "ACE1");
+    EXPECT(DuelPrefs_Save(&p, DUEL_TEST_PROFDIR));
+    EXPECT(DuelPrefs_Load(&q, DUEL_TEST_PROFDIR));
+    EXPECT_NEAR(q.vol_master, 0.33f, 1e-3f);
+    EXPECT_NEAR(q.sens, 1.4f, 1e-3f);
+    EXPECT_NEAR(q.dead, 0.22f, 1e-3f);
+    EXPECT(!strcmp(q.last_pilot, "ACE1"));
+    /* Missing dir -> defaults, never crash. */
+    EXPECT(!DuelPrefs_Load(&q, "/data/local/tmp/duel_nope_missing"));
+    EXPECT_NEAR(q.sens, 1.0f, 1e-6f);
+    printf("prefs_roundtrip ok\n");
+}
+
+/* M7: pilot stats record/save/load (one record per combat). */
+static void test_pilot_roundtrip(void) {
+    DuelPilot p, q;
+    DuelPilot_Defaults(&p, "ace-1");
+    EXPECT(!strcmp(p.name, "ACE-1")); /* sanitized upper */
+    EXPECT(p.last_win == -1);
+    DuelPilot_Record(&p, 1, 3, 2);
+    EXPECT(p.combats == 1 && p.wins == 1 && p.losses == 0);
+    EXPECT(p.kills == 3 && p.last_diff == 2 && p.last_win == 1);
+    DuelPilot_Record(&p, 0, 1, 0);
+    EXPECT(p.combats == 2 && p.wins == 1 && p.losses == 1);
+    EXPECT(p.kills == 4 && p.last_diff == 0 && p.last_win == 0);
+    EXPECT(DuelPilot_Save(&p, DUEL_TEST_PROFDIR));
+    EXPECT(DuelPilot_Load(&q, DUEL_TEST_PROFDIR, "ACE-1"));
+    EXPECT(q.combats == 2 && q.wins == 1 && q.kills == 4);
+    EXPECT(q.last_diff == 0 && q.last_win == 0);
+    /* Unknown pilot -> fresh defaults. */
+    EXPECT(!DuelPilot_Load(&q, DUEL_TEST_PROFDIR, "NOBODY"));
+    EXPECT(q.combats == 0 && q.last_win == -1);
+    EXPECT(!strcmp(q.name, "NOBODY"));
+    printf("pilot_roundtrip ok\n");
+}
+
+/* M7: pilot scan/delete roundtrip. */
+static void test_pilot_scan(void) {
+    char names[DUEL_PILOT_MAX][DUEL_PILOT_NAME_MAX + 1];
+    DuelPilot p;
+    int n0, n1, i, found = 0;
+    n0 = DuelPilot_Scan(DUEL_TEST_PROFDIR, names, DUEL_PILOT_MAX);
+    DuelPilot_Defaults(&p, "SCANME");
+    EXPECT(DuelPilot_Save(&p, DUEL_TEST_PROFDIR));
+    n1 = DuelPilot_Scan(DUEL_TEST_PROFDIR, names, DUEL_PILOT_MAX);
+    EXPECT(n1 == n0 + 1);
+    for (i = 0; i < n1; i++) {
+        if (!strcmp(names[i], "SCANME")) found = 1;
+        if (i > 0) EXPECT(strcmp(names[i - 1], names[i]) <= 0); /* sorted */
+    }
+    EXPECT(found);
+    EXPECT(DuelPilot_Delete(DUEL_TEST_PROFDIR, "SCANME"));
+    EXPECT(!DuelPilot_Delete(DUEL_TEST_PROFDIR, "SCANME")); /* gone */
+    EXPECT(DuelPilot_Scan(DUEL_TEST_PROFDIR, names, DUEL_PILOT_MAX) == n0);
+    EXPECT(DuelPilot_Scan("/data/local/tmp/duel_nope_missing", names,
+                           DUEL_PILOT_MAX) == 0);
+    printf("pilot_scan ok\n");
+}
+
+/* M7: difficulty clamps, survives resets, changes TIE spawn HP. */
+static void test_difficulty(void) {
+    DuelState a, b;
+    Duel_SetDifficulty(&a, 99);
+    EXPECT(a.diff == 2);
+    Duel_SetDifficulty(&a, -99);
+    EXPECT(a.diff == 0);
+    Duel_Init(&a);
+    EXPECT(a.diff == 1); /* pilot baseline */
+    Duel_SetDifficulty(&a, 0);
+    Duel_ResetCombat(&a);
+    EXPECT(a.diff == 0); /* survives reset */
+    Duel_Init(&b);
+    Duel_SetDifficulty(&b, 2);
+    Duel_ResetCombat(&b);
+    EXPECT(b.ties[0].hp > a.ties[0].hp); /* 1.3x vs 0.7x */
+    EXPECT_NEAR(b.ties[0].hp / a.ties[0].hp, 1.3f / 0.7f, 1e-4f);
+    {
+        /* Hand deadzone storage clamps to the options range. */
+        Duel_SetHandDead(&a, 9.0f);
+        EXPECT_NEAR(a.hand_dead, 0.30f, 1e-6f);
+        Duel_SetHandDead(&a, -1.0f);
+        EXPECT_NEAR(a.hand_dead, 0.05f, 1e-6f);
+    }
+    printf("difficulty ok\n");
+}
+
 int main(void) {
     test_quat();
     test_flight();
@@ -2774,6 +3039,14 @@ int main(void) {
     test_fist_dist();
     test_grab_fist();
     test_stick_rel();
+    test_font_glyphs();
+    test_menu_rows();
+    test_menu_strings();
+    test_menu_values();
+    test_prefs_roundtrip();
+    test_pilot_roundtrip();
+    test_pilot_scan();
+    test_difficulty();
     if (fails == 0) printf("ALL DUEL TESTS PASS\n");
     else printf("%d FAILURES\n", fails);
     return fails == 0 ? 0 : 1;

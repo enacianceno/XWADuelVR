@@ -114,6 +114,16 @@ DuelAudio *DuelAudio_Create(const char *audio_dir) {
     return a;
 }
 
+void DuelAudio_SetVolumes(DuelAudio *a, float master, float music, float sfx) {
+    if (!a) return;
+    if (master < 0.0f) master = 0.0f; else if (master > 1.0f) master = 1.0f;
+    if (music < 0.0f) music = 0.0f; else if (music > 1.0f) music = 1.0f;
+    if (sfx < 0.0f) sfx = 0.0f; else if (sfx > 1.0f) sfx = 1.0f;
+    a->st.vol_master = master;
+    a->st.vol_music = music;
+    a->st.vol_sfx = sfx;
+}
+
 void DuelAudio_Update(DuelAudio *a, const DuelState *s, DuelListener lis,
                       float dt) {
     if (!a) return;
@@ -125,7 +135,7 @@ void DuelAudio_Update(DuelAudio *a, const DuelState *s, DuelListener lis,
         if (avail >= (int)(DUEL_AUDIO_CHUNK * 2 * sizeof(float)) * 2) break;
         memset(a->mixbuf, 0, DUEL_AUDIO_CHUNK * 2 * sizeof(float));
         DuelAudio_MixChunk(&a->st, a->mixbuf, DUEL_AUDIO_CHUNK);
-        DuelAudio_NormalizeChunk(a->mixbuf, DUEL_AUDIO_CHUNK);
+        DuelAudio_NormalizeChunk(a->mixbuf, DUEL_AUDIO_CHUNK, a->st.vol_master);
         SDL_PutAudioStreamData(a->stream, a->mixbuf,
                                DUEL_AUDIO_CHUNK * 2 * sizeof(float));
     }

@@ -462,7 +462,8 @@ def main():
           and "SDL_DrawGPUIndexedPrimitives(rp, (Uint32)r->hand_ni[hside]" in text
           and "SDL_BindGPUVertexBuffers(rp, 0, &dvb, 1)" in text)
     check("hand fire ORed in main, sim untouched",
-          "in.fire = in.fire || DuelRender_HandFire(render);" in main_text
+          "int hf = DuelRender_HandFire(render);" in main_text
+          and "in.fire = in.fire || hf;" in main_text
           and "HandFire" not in sim_text)
     # 33. M3.6: raw-index IBO (no double offset), index-curled thumb
     # gate, free grab assignment (either hand, either target).
@@ -541,6 +542,33 @@ def main():
           "r->hand_show[hside]" in text
           and "h->j[0].pos_valid && h->j[1].pos_valid" in text
           and "r->hand_ok[side] >= 3" in text)
+    # 39. M7 menu: pure tri slice then pure line slice (pipes need them).
+    check("M7 menu pure slices (tris then lines)",
+          "menu_tri_range.count = dw.count - menu_tri_range.first;" in text
+          and "menu_line_range.count = dw.count - menu_line_range.first;" in text
+          and text.find("menu_tri_range.count = dw.count") <
+          text.find("menu_line_range.count = dw.count"))
+    check("M7 menu ranges gated on panel show",
+          "menu_tri_range.first = dw.count;" in text
+          and "if (r->menu_show && r->menu)" in text)
+    # 40. M7 main: sim frozen outside combat, result recorded once.
+    main_text = (SRC.parent / "duel_main.c").read_text(encoding="utf-8")
+    check("M7 sim only steps in combat",
+          "if (in_combat_now)" in main_text
+          and main_text.count("Duel_Update(&sim") == 2)
+    check("M7 result recorded once on reset edge",
+          "prev_phase == DUEL_PHASE_DESTROYED" in main_text
+          and "DuelPilot_Record(&menu.pilot" in main_text
+          and "DuelMenu_SetState(&menu, DUEL_APP_RESULT)" in main_text)
+    check("M7 pause on menu button + focus loss",
+          "DUEL_APP_PAUSED" in main_text
+          and "DuelXr_HasFocus()" in main_text
+          and "need_fire_release = 1" in main_text)
+    check("M7 fresh grip after screen transitions",
+          main_text.count("DuelRender_ClearGrabs(render)") >= 4)
+    check("M7 pilot baseline difficulty survives reset",
+          "s->diff = 1; /* M7: pilot = frozen baseline" in sim_text
+          and "int df = s->diff;" in sim_text)
 
     if FAILURES:
         print(f"{len(FAILURES)} FAILURES")

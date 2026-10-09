@@ -17,6 +17,8 @@
 #include "duel_sprite.h" /* P1.5/P1.7: authentic DAT sprite billboards */
 #include "duel_hands.h" /* M3.0: native hand tracking (visual only) */
 #include "duel_xr.h" /* P0.4: consume reference-space (recenter) events */
+#include "duel_menu.h" /* M7: panel state/rows/hit (main-owned) */
+#include "duel_font.h" /* M7: stroke glyphs for panel text */
 
 /* P1.2 diagnostic sky: 0 = procedural planet/moon hidden (clean black +
  * XWA-stars evaluation; P1.3 replaces them with XWA/XWAUP artwork). */
@@ -199,6 +201,20 @@ struct DuelRender {
      * since M6: pure yaw, roll moved to the left lever); tracks the
      * holder hand while held, spring-decays on release. */
     float defl_pd, defl_rd;
+    /* M7: hand-lever sensitivity multiplier (menu-owned, 1.0 = the
+     * frozen feel; applied at publish, clamped to unit). */
+    float hand_sens;
+    /* M7 menu panel (world-locked, placed once per screen by main). */
+    int menu_show;
+    int menu_hide_hud; /* menu/result: no cue/diamond/lead/bars */
+    DuelVec3 menu_center;
+    DuelQuat menu_quat; /* duel_q_forward points INTO the screen */
+    const DuelMenu *menu; /* main-owned, valid for the run */
+    int menu_hover;     /* hand-ray row (-1 none), eye 0+1 agree */
+    float menu_hx, menu_hy; /* hover point, panel-local */
+    int menu_pinch[2];  /* per-side pinch level (hysteresis) */
+    DuelVec3 menu_ray_o[2], menu_ray_e[2]; /* ray visuals */
+    int menu_ray_on[2];
     /* M3.4: right-hand trigger state (index extension while HELD).
      * M3.7: one fire machine per hand (either thumb fires the stick). */
     DuelFire fire_r, fire_l;
@@ -1103,6 +1119,7 @@ DuelRender *DuelRender_Create(SDL_GPUDevice *device, SDL_GPUTextureFormat swap_f
     /* M3.6: no grab winners until the first assignment (calloc would
      * read as LEFT holding everything). */
     r->grab_holder[0] = r->grab_holder[1] = -1;
+    r->hand_sens = 1.0f; /* M7: frozen feel until the menu changes it */
     return r;
 }
 
@@ -1840,11 +1857,26 @@ int DuelRender_HandThrottle(const DuelRender *r, float *value) {
 /* M6: left-lever roll ownership for the main loop. Same contract as
  * the stick (held OR spring settling); the sim applies it to roll
  * only, independent of the stick's pitch/yaw. */
+void DuelRender_SetHandSens(DuelRender *r, float sens) {
+    if (!r) return;
+    if (sens < 0.5f) sens = 0.5f;
+    if (sens > 1.5f) sens = 1.5f;
+    r->hand_sens = sens;
+}
+
+static float duel_sens_apply(const DuelRender *r, float v) {
+    float s = r->hand_sens > 0.0f ? r->hand_sens : 1.0f;
+    v *= s;
+    if (v < -1.0f) v = -1.0f;
+    if (v > 1.0f) v = 1.0f;
+    return v;
+}
+
 int DuelRender_HandLever(const DuelRender *r, float *ld) {
 #if DUEL_VIRTUAL_HANDS
     int held = r->grab_holder[DUEL_TGT_QUAD] >= 0;
     int live = r->defl_ld != 0.0f;
-    if (ld) *ld = r->defl_ld;
+    if (ld) *ld = duel_sens_apply(r, r->defl_ld);
     return (held || live) ? 1 : 0;
 #else
     (void)r;
@@ -1860,8 +1892,8 @@ int DuelRender_HandStick(const DuelRender *r, float *pd, float *rd) {
 #if DUEL_VIRTUAL_HANDS
     int held = r->grab_holder[DUEL_TGT_STICK] >= 0;
     int live = r->defl_pd != 0.0f || r->defl_rd != 0.0f;
-    if (pd) *pd = r->defl_pd;
-    if (rd) *rd = r->defl_rd;
+    if (pd) *pd = duel_sens_apply(r, r->defl_pd);
+    if (rd) *rd = duel_sens_apply(r, r->defl_rd);
     return (held || live) ? 1 : 0;
 #else
     (void)r;
@@ -1869,6 +1901,64 @@ int DuelRender_HandStick(const DuelRender *r, float *pd, float *rd) {
     if (rd) *rd = 0.0f;
     return 0;
 #endif
+}
+
+/* M7: world-locked menu panel. Placed ONCE per screen by main (from
+ * the head pose at transition); never follows the head afterwards. */
+void DuelRender_SetMenuPanel(DuelRender *r, int show, const DuelMenu *m,
+                             DuelVec3 center, DuelQuat quat) {
+    if (!r) return;
+    r->menu_show = show ? 1 : 0;
+    r->menu = m;
+    r->menu_center = center;
+    r->menu_quat = quat;
+    if (!show) { r->menu_hover = -1; r->menu_pinch[0] = r->menu_pinch[1] = 0; }
+}
+
+/* M7: hide the combat HUD (cue/diamond/lead/bars) behind menu screens.
+ * Pause keeps it (frozen combat state stays informative). */
+void DuelRender_SetCombatHud(DuelRender *r, int show) {
+    if (!r) return;
+    r->menu_hide_hud = show ? 0 : 1;
+}
+
+/* M7: drop every grab + deflection + fire latch (screen transitions
+ * require a FRESH grip before the levers respond again). */
+void DuelRender_ClearGrabs(DuelRender *r) {
+    int i, t;
+    if (!r) return;
+    for (i = 0; i < 2; i++) {
+        for (t = 0; t < 2; t++) DuelGrab_Reset(&r->grab[i][t]);
+        r->grab_holder[i] = -1;
+        r->stick_anchor_valid[i] = 0;
+        r->lever_anchor_valid[i] = 0;
+        r->grab_palm_valid[i] = 0;
+        r->grab_mid_valid[i] = 0;
+    }
+    r->defl_pd = r->defl_rd = r->defl_ld = 0.0f;
+    DuelFire_Reset(&r->fire_l);
+    DuelFire_Reset(&r->fire_r);
+}
+
+/* M7 options RECENTRAR: same path as a Meta recenter (ship/cockpit
+ * never move; the neutral head reference is recaptured). */
+void DuelRender_RequestRecenter(DuelRender *r) {
+    if (!r) return;
+    SDL_Log("DUEL cal: manual recenter requested");
+    r->cal.valid = 0;
+    r->cal_space = 1;
+    r->cal_settle = DUEL_CAL_SETTLE_FRAMES - DUEL_CAL_SPACE_SETTLE;
+}
+
+/* M7: hand-ray hover row + panel-local point + any-pinch level.
+ * Computed during the eye pass (previous frame's data: same 1-frame
+ * lag as the hand-lever publish). */
+int DuelRender_MenuPointer(const DuelRender *r, int *row, float *x, float *y) {
+    if (!r || !r->menu_show || !r->menu) return 0;
+    if (row) *row = r->menu_hover;
+    if (x) *x = r->menu_hx;
+    if (y) *y = r->menu_hy;
+    return (r->menu_pinch[0] || r->menu_pinch[1]) ? 1 : 0;
 }
 
 /* M3.4: 1 while a thumb trigger is pulled, else 0 (M3.7: either). */
@@ -1943,6 +2033,72 @@ static Uint32 skin_hands(DuelRender *r, const DuelState *s) {
 }
 #endif
 
+/* M7 menu text: stroke glyphs as world-space line pairs on the panel
+ * plane. align: 0 left (x = left edge), 1 center, 2 right (x = edge).
+ * size = meters per font unit; y = text BASELINE in panel-local. */
+static void duel_menu_text(DynWriter *dw, DuelVec3 c, DuelVec3 px, DuelVec3 py,
+                           const char *s, float x, float y, float size,
+                           int align, float cr, float cg, float cb) {
+    float w;
+    const char *p;
+    DuelFontSeg segs[DUEL_FONT_MAXSEGS];
+    if (!s || !*s) return;
+    w = DuelFont_TextW(s) * size;
+    if (align == 1) x -= w * 0.5f;
+    else if (align == 2) x -= w;
+    for (p = s; *p; p++) {
+        int n = DuelFont_Glyph(*p, segs, DUEL_FONT_MAXSEGS);
+        int i;
+        if (*p == ' ') { x += DUEL_FONT_ADV * size; continue; }
+        for (i = 0; i < n; i++) {
+            float *v = dyn_reserve(dw, 2);
+            DuelVec3 a, b;
+            if (!v) return;
+            a = duel_v3_add(c, duel_v3_add(
+                duel_v3_scale(px, x + (float)segs[i].x0 * size),
+                duel_v3_scale(py, y + (float)segs[i].y0 * size)));
+            b = duel_v3_add(c, duel_v3_add(
+                duel_v3_scale(px, x + (float)segs[i].x1 * size),
+                duel_v3_scale(py, y + (float)segs[i].y1 * size)));
+            dyn_vert(v, a, cr, cg, cb, 1.0f);
+            dyn_vert(v + 9, b, cr, cg, cb, 1.0f);
+        }
+        x += DUEL_FONT_ADV * size;
+    }
+}
+
+/* Flat quad on the panel plane (2 tris, 6 verts) into a tri range. */
+/* Slider fill: same label convention as duel_menu.c, normalized 0..1. */
+static float duel_menu_selfrac(const DuelMenu *m, int row) {
+    DuelMenuRow rows[DUEL_MENU_MAXROWS];
+    int n = DuelMenu_Rows(m, rows, DUEL_MENU_MAXROWS);
+    if (row < 0 || row >= n || rows[row].kind != DUEL_ROW_SLIDER) return 0.0f;
+    {
+        const char *lab = rows[row].label;
+        if (!strcmp(lab, "VOLUMEN")) return m->vol_master;
+        if (!strcmp(lab, "MUSICA")) return m->vol_music;
+        if (!strcmp(lab, "EFECTOS")) return m->vol_sfx;
+        if (!strcmp(lab, "SENSIBILIDAD")) return m->sens - 0.5f;
+        if (!strcmp(lab, "ZONA MUERTA")) return (m->dead - 0.05f) / 0.25f;
+    }
+    return 0.0f;
+}
+
+static void duel_menu_quad(DynWriter *dw, DuelVec3 c, DuelVec3 px, DuelVec3 py,
+                           float x0, float y0, float x1, float y1,
+                           float cr, float cg, float cb, float ca) {
+    float *d = dyn_reserve(dw, 6);
+    DuelVec3 p0, p1, p2, p3;
+    if (!d) return;
+    p0 = duel_v3_add(c, duel_v3_add(duel_v3_scale(px, x0), duel_v3_scale(py, y0)));
+    p1 = duel_v3_add(c, duel_v3_add(duel_v3_scale(px, x1), duel_v3_scale(py, y0)));
+    p2 = duel_v3_add(c, duel_v3_add(duel_v3_scale(px, x1), duel_v3_scale(py, y1)));
+    p3 = duel_v3_add(c, duel_v3_add(duel_v3_scale(px, x0), duel_v3_scale(py, y1)));
+    dyn_vert(d + 0, p0, cr, cg, cb, ca); dyn_vert(d + 9, p1, cr, cg, cb, ca);
+    dyn_vert(d + 18, p2, cr, cg, cb, ca); dyn_vert(d + 27, p0, cr, cg, cb, ca);
+    dyn_vert(d + 36, p2, cr, cg, cb, ca); dyn_vert(d + 45, p3, cr, cg, cb, ca);
+}
+
 void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
                     SDL_GPUTexture *target, SDL_GPUTexture *depth,
                     int32_t w, int32_t h,
@@ -2013,7 +2169,8 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
     struct { int first, count; } laser_range = { 0, 0 }, part_range = { 0, 0 },
         line_range = { 0, 0 }, hud_range = { 0, 0 }, flash_range = { 0, 0 },
         near_range = { 0, 0 }, mid_range = { 0, 0 }, hand_range = { 0, 0 },
-        hbone_range = { 0, 0 }, quad_range = { 0, 0 };
+        hbone_range = { 0, 0 }, quad_range = { 0, 0 },
+        menu_tri_range = { 0, 0 }, menu_line_range = { 0, 0 };
     laser_range.first = dw.count;
     for (int i = 0; i < DUEL_LASER_POOL; i++) {
         const DuelLaser *l = &s->lasers[i];
@@ -2156,6 +2313,61 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
             }
         }
         hand_range.count = dw.count - hand_range.first;
+        /* M7: menu hand-ray hover (index MCP->tip) + pinch levels. Both
+         * eyes compute the same inputs: idempotent, no per-eye drift. */
+        if (r->menu_show && r->menu) {
+            DuelVec3 pax = duel_q_right(r->menu_quat);
+            DuelVec3 pay = duel_q_up(r->menu_quat);
+            DuelVec3 pn = duel_v3_scale(duel_q_forward(r->menu_quat), -1.0f);
+            float ph = DuelMenu_PanelH(r->menu);
+            int order[2] = { 1, 0 }; /* right hand wins ties */
+            int o;
+            r->menu_hover = -1;
+            for (o = 0; o < 2; o++) {
+                int sd = order[o];
+                const DuelHand *h = DuelHands_Get(sd);
+                float pd = r->grab_pinch[sd];
+                /* Pinch level with hysteresis (click = make edge in main). */
+                if (pd < 0.035f) r->menu_pinch[sd] = 1;
+                else if (pd > 0.050f) r->menu_pinch[sd] = 0;
+                r->menu_ray_on[sd] = 0;
+                if (!h->active) continue;
+                if (!h->j[6].pos_valid || !h->j[10].pos_valid) continue;
+                {
+                    DuelVec3 tip = hw[sd][10];
+                    DuelVec3 d = duel_v3_sub(tip, hw[sd][6]);
+                    float dl = duel_v3_len(d);
+                    float denom, t;
+                    if (dl < 1e-6f) continue;
+                    d = duel_v3_scale(d, 1.0f / dl);
+                    r->menu_ray_on[sd] = 1;
+                    r->menu_ray_o[sd] = tip;
+                    r->menu_ray_e[sd] = duel_v3_add(tip, duel_v3_scale(d, 1.5f));
+                    denom = duel_v3_dot(d, pn);
+                    if (fabsf(denom) < 1e-6f) continue;
+                    t = duel_v3_dot(duel_v3_sub(r->menu_center, tip), pn) / denom;
+                    if (t < 0.0f) continue;
+                    {
+                        DuelVec3 hit = duel_v3_add(tip, duel_v3_scale(d, t));
+                        DuelVec3 rel = duel_v3_sub(hit, r->menu_center);
+                        float lx = duel_v3_dot(rel, pax);
+                        float ly = duel_v3_dot(rel, pay);
+                        if (fabsf(lx) > DUEL_MENU_PANEL_W * 0.5f ||
+                            fabsf(ly) > ph * 0.5f) continue;
+                        r->menu_ray_e[sd] = hit;
+                        if (r->menu_hover < 0) {
+                            r->menu_hover = DuelMenu_HitRow(r->menu, lx, ly);
+                            r->menu_hx = lx;
+                            r->menu_hy = ly;
+                        }
+                    }
+                }
+            }
+        } else {
+            r->menu_hover = -1;
+            r->menu_pinch[0] = r->menu_pinch[1] = 0;
+            r->menu_ray_on[0] = r->menu_ray_on[1] = 0;
+        }
         /* bones start where joints ended */
         hbone_range.first = dw.count;
         for (side = 0; side < 2; side++) {
@@ -2313,6 +2525,117 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
     quad_range.count = dw.count - quad_range.first;
 #endif
 #endif
+    /* M7 menu panel (world-locked; hands AND controllers). Two pure
+     * passes: tris (bg/rows/sliders/border) then glyph/ray lines.
+     * Pipes need pure slices, so text runs in a second loop. */
+    menu_tri_range.first = dw.count;
+    menu_line_range.first = dw.count;
+    if (r->menu_show && r->menu) {
+        DuelVec3 pax = duel_q_right(r->menu_quat);
+        DuelVec3 pay = duel_q_up(r->menu_quat);
+        DuelVec3 cc = duel_v3_add(r->menu_center,
+            duel_v3_scale(duel_q_forward(r->menu_quat), -0.002f));
+        float ph = DuelMenu_PanelH(r->menu);
+        float pw = DUEL_MENU_PANEL_W;
+        DuelMenuRow rows[DUEL_MENU_MAXROWS];
+        int n = DuelMenu_Rows(r->menu, rows, DUEL_MENU_MAXROWS);
+        int i, hl = r->menu_hover >= 0 ? r->menu_hover : r->menu->sel;
+        float bw = 0.006f;
+        duel_menu_quad(&dw, cc, pax, pay, -pw * 0.5f, -ph * 0.5f,
+                       pw * 0.5f, ph * 0.5f, 0.015f, 0.020f, 0.045f, 0.93f);
+        duel_menu_quad(&dw, cc, pax, pay, -pw * 0.5f, ph * 0.5f - bw,
+                       pw * 0.5f, ph * 0.5f, 1.0f, 0.72f, 0.25f, 1.0f);
+        duel_menu_quad(&dw, cc, pax, pay, -pw * 0.5f, -ph * 0.5f,
+                       pw * 0.5f, -ph * 0.5f + bw, 1.0f, 0.72f, 0.25f, 1.0f);
+        duel_menu_quad(&dw, cc, pax, pay, -pw * 0.5f, -ph * 0.5f,
+                       -pw * 0.5f + bw, ph * 0.5f, 1.0f, 0.72f, 0.25f, 1.0f);
+        duel_menu_quad(&dw, cc, pax, pay, pw * 0.5f - bw, -ph * 0.5f,
+                       pw * 0.5f, ph * 0.5f, 1.0f, 0.72f, 0.25f, 1.0f);
+        for (i = 0; i < n; i++) {
+            float x0, y0, x1, y1;
+            if (rows[i].kind == DUEL_ROW_LABEL) continue;
+            if (!DuelMenu_RowRect(r->menu, i, &x0, &y0, &x1, &y1)) continue;
+            if (i == hl)
+                duel_menu_quad(&dw, cc, pax, pay, x0, y0, x1, y1,
+                               0.10f, 0.32f, 0.42f, 0.90f);
+            else
+                duel_menu_quad(&dw, cc, pax, pay, x0, y0, x1, y1,
+                               0.05f, 0.07f, 0.12f, 0.90f);
+            if (rows[i].kind == DUEL_ROW_SLIDER) {
+                float fy = y0 + 0.018f;
+                float fx = x0 + 0.03f + (x1 - x0 - 0.06f) *
+                    duel_menu_selfrac(r->menu, i);
+                duel_menu_quad(&dw, cc, pax, pay, x0 + 0.03f, fy,
+                               x1 - 0.03f, fy + 0.008f,
+                               0.20f, 0.22f, 0.30f, 1.0f);
+                duel_menu_quad(&dw, cc, pax, pay, x0 + 0.03f, fy, fx,
+                               fy + 0.008f, 0.30f, 0.85f, 1.0f, 1.0f);
+            }
+        }
+    }
+    menu_tri_range.count = dw.count - menu_tri_range.first;
+    menu_line_range.first = dw.count;
+    if (r->menu_show && r->menu) {
+        DuelVec3 pax = duel_q_right(r->menu_quat);
+        DuelVec3 pay = duel_q_up(r->menu_quat);
+        DuelVec3 cc = duel_v3_add(r->menu_center,
+            duel_v3_scale(duel_q_forward(r->menu_quat), -0.004f));
+        float ph = DuelMenu_PanelH(r->menu);
+        DuelMenuRow rows[DUEL_MENU_MAXROWS];
+        int n = DuelMenu_Rows(r->menu, rows, DUEL_MENU_MAXROWS);
+        float tsz = 0.0121f, rsz = 0.0072f, hsz = 0.0050f;
+        int i;
+        float ty = ph * 0.5f - DUEL_MENU_PAD - DUEL_MENU_TITLE_H * 0.5f -
+            3.5f * tsz;
+        duel_menu_text(&dw, cc, pax, pay, DuelMenu_Title(r->menu), 0.0f,
+                       ty, tsz, 1, 1.0f, 0.72f, 0.25f);
+        if (r->menu->state == DUEL_APP_RESULT) {
+            char kb[24];
+            float ky = ph * 0.5f - DUEL_MENU_PAD - DUEL_MENU_TITLE_H -
+                DUEL_MENU_ROW_GAP - (DUEL_MENU_ROW_H * 0.5f + 3.5f * rsz);
+            snprintf(kb, sizeof(kb), "BAJAS: %d", r->menu->result_kills);
+            duel_menu_text(&dw, cc, pax, pay, kb, 0.0f, ky, rsz, 1,
+                           0.85f, 0.88f, 0.95f);
+        }
+        for (i = 0; i < n; i++) {
+            float top = ph * 0.5f - DUEL_MENU_PAD - DUEL_MENU_TITLE_H -
+                DUEL_MENU_ROW_GAP - (float)i *
+                (DUEL_MENU_ROW_H + DUEL_MENU_ROW_GAP);
+            float by;
+            if (r->menu->state == DUEL_APP_RESULT)
+                top -= DUEL_MENU_ROW_H + DUEL_MENU_ROW_GAP;
+            by = top - DUEL_MENU_ROW_H * 0.5f - 3.5f * rsz;
+            if (rows[i].kind == DUEL_ROW_LABEL) {
+                duel_menu_text(&dw, cc, pax, pay, rows[i].label, 0.0f, by,
+                               rsz, 1, 0.55f, 0.58f, 0.65f);
+                continue;
+            }
+            {
+                float x0, y0, x1, y1;
+                char val[16];
+                if (!DuelMenu_RowRect(r->menu, i, &x0, &y0, &x1, &y1)) continue;
+                by = y0 + (DUEL_MENU_ROW_H - 7.0f * rsz) * 0.5f;
+                duel_menu_text(&dw, cc, pax, pay, rows[i].label, x0 + 0.03f,
+                               by, rsz, 0, 0.85f, 0.88f, 0.95f);
+                DuelMenu_RowValue(r->menu, i, val, sizeof(val));
+                if (val[0])
+                    duel_menu_text(&dw, cc, pax, pay, val, x1 - 0.03f, by,
+                                   rsz, 2, 0.65f, 0.95f, 1.0f);
+            }
+        }
+        duel_menu_text(&dw, cc, pax, pay, "APUNTA + PELLIZCA / GATILLO",
+                       0.0f, ph * -0.5f - 0.055f, hsz, 1,
+                       0.55f, 0.60f, 0.68f);
+        for (i = 0; i < 2; i++) {
+            float *v;
+            if (!r->menu_ray_on[i]) continue;
+            v = dyn_reserve(&dw, 2);
+            if (!v) break;
+            dyn_vert(v, r->menu_ray_o[i], 0.3f, 0.9f, 1.0f, 0.9f);
+            dyn_vert(v + 9, r->menu_ray_e[i], 0.3f, 0.9f, 1.0f, 0.15f);
+        }
+    }
+    menu_line_range.count = dw.count - menu_line_range.first;
     /* reticle: XWA-style gunsight (cross + circle + center dot) collimated
      * at 120 m on the SHIP forward axis. P0.2f: the 8 m v1 sat 6.3 deg off
      * the bolt direction (eye 0.88 m above the ship axis); at 120 m the

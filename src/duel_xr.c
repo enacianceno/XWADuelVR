@@ -32,6 +32,7 @@ static SDL_GPUDevice *s_device = NULL;
 static int s_running = 0;
 static int s_shouldQuit = 0;
 static int s_spaceChange = 0; /* sticky: LOCAL recenter seen, not yet consumed */
+static int s_focused = 1; /* M7: session FOCUSED (auto-pause on loss) */
 
 static DuelEyeSwapchain s_eyes[DUEL_EYE_COUNT];
 static Uint32 s_viewCount = 0;
@@ -255,6 +256,7 @@ int DuelXr_Init(SDL_GPUDevice **out_device) {
 }
 
 int DuelXr_IsRunning(void) { return s_running; }
+int DuelXr_HasFocus(void) { return s_focused; }
 int DuelXr_ShouldQuit(void) { return s_shouldQuit; }
 SDL_GPUTextureFormat DuelXr_SwapchainFormat(void) { return s_format; }
 XrInstance DuelXr_Instance(void) { return s_instance; }
@@ -281,6 +283,8 @@ void DuelXr_PollEvents(void) {
     while (s_xrPollEvent && s_xrPollEvent(s_instance, &ev) == XR_SUCCESS) {
         if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             XrEventDataSessionStateChanged *st = (XrEventDataSessionStateChanged *)&ev;
+            /* M7: focus tracking for auto-pause (combat only). */
+            s_focused = (st->state == XR_SESSION_STATE_FOCUSED) ? 1 : 0;
             if (st->state == XR_SESSION_STATE_STOPPING) {
                 s_xrEndSession(s_session);
                 s_running = 0;

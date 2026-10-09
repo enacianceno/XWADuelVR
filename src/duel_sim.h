@@ -50,6 +50,7 @@ typedef struct DuelInput {
     float roll;     /* -1..1, right stick X (M8 axes[3]) */
     float thr_axis; /* -1..1, right stick Y: integrates throttle lever */
     int fire;       /* right trigger past hysteresis */
+    int menu;       /* M7: left menu button level (pause/menu select) */
     /* P0.4: raw sticks (telemetry; proves the live mapping on-device) */
     float raw_lx, raw_ly, raw_rx, raw_ry;
 } DuelInput;
@@ -81,6 +82,11 @@ typedef struct DuelState {
     float hand_yaw;
     int hand_lev_active;
     float hand_lev_roll;
+    /* M7: difficulty index (0 rookie / 1 pilot / 2 ace; pilot = the
+     * frozen baseline, multipliers all 1.0) + runtime hand deadzone
+     * (default 0.15 = DUEL_DEADZONE; controllers keep the #define). */
+    int diff;
+    float hand_dead;
 } DuelState;
 
 void Duel_Init(DuelState *s);
@@ -92,6 +98,10 @@ void Duel_HandThrottle(DuelState *s, int active, float value);
 void Duel_HandStick(DuelState *s, int active, float pitch, float yaw);
 /* Main loop: publish the M6 left-lever roll before Duel_Update. */
 void Duel_HandLever(DuelState *s, int active, float roll);
+/* M7 menu: difficulty (clamped 0..2, survives combat resets) and the
+ * hand-lever deadzone (clamped 0.05..0.30, default 0.15). */
+void Duel_SetDifficulty(DuelState *s, int diff);
+void Duel_SetHandDead(DuelState *s, float dead);
 
 /* Steering helper (also used by tests): turn 'orient' toward 'dir'. */
 DuelQuat Duel_SteerToward(DuelQuat orient, DuelVec3 dir, float max_rad, float dt);

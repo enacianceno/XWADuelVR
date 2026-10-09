@@ -29,6 +29,7 @@ void DuelXr_PollEvents(void);
 int DuelXr_ConsumeSpaceChange(void);
 int DuelXr_IsRunning(void);
 int DuelXr_ShouldQuit(void);
+int DuelXr_HasFocus(void); /* M7: 1 while session FOCUSED */
 SDL_GPUTextureFormat DuelXr_SwapchainFormat(void);
 int DuelXr_EyeSize(int eye, int32_t *w, int32_t *h);
 SDL_GPUTexture *DuelXr_EyeDepth(int eye);
