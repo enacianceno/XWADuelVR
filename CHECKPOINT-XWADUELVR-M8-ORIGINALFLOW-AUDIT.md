@@ -173,5 +173,45 @@ Regla: sin gestos en menús (B-menu/modal usan cursor+RT).
 Protocolo detallado en SP1-RETURN-STATUS.md §prueba física.
 
 ## Next step
-UNO: usuario corre S1 en visor (M8 instalado) y reporta;
-en paralelo Muse audita bindings S2 (solo lectura).
+UNO (obsoleto): S1 corre en S1b abajo; piloto multi-perfil auditado.
+
+## 10. S1a: piloto original DEMOSTRADO (2026-10-09, read-only)
+
+Dispositivo 3487C10H9T0BKZ: instalado m8integrated1
+0.8.2-integrated1 (SP1). M6 ya no instalado; piloto vivo:
+`files/m8test0.plt`, 152076 bytes, SHA-256
+`D942F5C4962F1776919902A668C0767F659F6BE7A8F5CE7A6FD01A3D23C90F79`
+(pull binario vía `cmd` + exec-out; PowerShell/`cp` a
+/data/local/tmp corrompen o deniegan).
+
+Parseado con `PilotData` del motor (`mission_setup.h:200`):
+- name=m8test, totalScore=324, gameMode=2, missionDir=3.
+- mainStats: 70 bajas (43/15/12), 7 amigas, 2515 disparos
+  energía, 27 pérdidas, tour misión 0: 15 vuelos/7 fallos.
+- 58 misiones totales, rango "Ground Crew", 155 naves en
+  tech room. `lastpilot m8test` en config.cfg.
+CONCLUSIÓN: Combat Simulator SÍ registra resultados en el
+piloto original (stats + misiones + rachas + tech room).
+
+Multi-piloto (requisito usuario):
+- Motor tiene TODO excepto UI de roster: `Pilot_CreateNew`
+  (slot libre `<nombre><i>.plt`), `Pilot_LoadFile`,
+  `Pilot_FindAndLoadByName` (escanea *.plt por nombre
+  interno), `lastpilot` persiste en config.cfg.
+- Arranque: carga lastpilot o crea. Concourse solo pregunta
+  nombre si NO hay piloto (`concourse.c:503`).
+- GAP: no hay pantalla roster/cambio de piloto cableada.
+  Adaptación mínima propuesta (M8-side, motor intacto):
+  selector pre-frontend o reutilizar el prompt; documentado
+  como adaptación, no original.
+
+## 11. S1b pendiente (visor, usuario)
+
+M8 0.8.2 SP1 instalado: escaramuza → B → Return to Simulator
+→ confirmar → setup → relanzar; B-menu 30s (probe-4 NO
+instalado: .starprobe tiene otra build); crear 2º piloto
+(nombre distinto) cuando exista el selector.
+
+## Next step
+UNO: S2 auditoría bindings (solo lectura) + diseño del
+selector multi-piloto M8-side para aprobación.
