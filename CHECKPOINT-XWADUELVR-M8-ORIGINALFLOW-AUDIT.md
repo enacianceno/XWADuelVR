@@ -213,5 +213,21 @@ instalado: .starprobe tiene otra build); crear 2º piloto
 (nombre distinto) cuando exista el selector.
 
 ## Next step
-UNO: S2 auditoría bindings (solo lectura) + diseño del
-selector multi-piloto M8-side para aprobación.
+UNO (obsoleto): roster IMPLEMENTADO y entregado, ver §12.
+
+## 12. PATH B primera entrega (2026-10-09)
+
+- Fotos usuario identificadas: img1 = DuelVR M7b (panel
+  propio, sim propia); img2/3 = M8 starprobe (frontend
+  ORIGINAL Quick Skirmish, piloto m8test).
+- Build: XWAQuest M8 **0.8.3-pathb1**
+  (`org.openxwa.xwaquest.m8integrated1`), SHA-256
+  `CA04CFA8...50267DEC`, instalado con -r (piloto intacto).
+- Roster pre-boot + acorde RC+LC en menú; motor intacto.
+- CPU suite verde; boot adb OK sin FATAL.
+- Detalle: XWAQuest `m8integrated1/PATHB1-DELIVERY.md`.
+- DuelVR congelado como referencia (`dffbf21`+).
+
+## Next step
+UNO: validación física usuario (protocolo §6 de
+PATHB1-DELIVERY.md); después S3 manos/palancas por capas.
