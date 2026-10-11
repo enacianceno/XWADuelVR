@@ -1,5 +1,10 @@
 # XWADuelVR
 
+<video src="https://github.com/enacianceno/XWADuelVR/raw/master/docs/videos/duel-uat-gameplay.mp4" controls width="100%"></video>
+
+*Video de juego real capturado en el visor. Si no se reproduce aquí,
+[ver/descargar el video](https://github.com/enacianceno/XWADuelVR/raw/master/docs/videos/duel-uat-gameplay.mp4).*
+
 Duelo X-Wing vs TIE en realidad virtual standalone para Meta Quest:
 tú contra oleadas TIE desde el cockpit, con menú tablet que puedes
 agarrar con las manos, rondas configurables y botón físico de pausa
