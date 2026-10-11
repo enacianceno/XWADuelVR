@@ -13,6 +13,7 @@
 #include "duel_math.h"
 #include "duel_menu.h"
 #include "duel_motion.h"
+#include "duel_net.h"
 #include "duel_profile.h"
 #include "duel_sim.h"
 #include "duel_sky.h"
@@ -2779,7 +2780,7 @@ static void test_menu_rows(void) {
     /* BRIEF: labels skipped by nav + rect/hit. */
     DuelMenu_SetState(&m, DUEL_APP_BRIEF);
     n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
-    EXPECT(n == 8); /* M10: + BATALLA, M19: + RONDAS choice */
+    EXPECT(n == 9); /* M10: + BATALLA, M19: + RONDAS, MP-B1: + MODO */
     EXPECT(m.sel == 3); /* DIFICULTAD choice */
     {
         float x0, y0, x1, y1;
@@ -2811,7 +2812,7 @@ static void test_menu_rows(void) {
     EXPECT(m.difficulty == DUEL_DIFF_PILOT);
     /* M10: choice click acts on the clicked row even when sel is elsewhere
      * (touch taps a row without moving the controller selection first). */
-    m.sel = 6; /* INICIAR */
+    m.sel = 7; /* INICIAR */
     EXPECT(DuelMenu_ActivateRow(&m, 3) == DUEL_ACT_NONE);
     EXPECT(m.difficulty == DUEL_DIFF_ACE);
     EXPECT(m.sel == 3);
@@ -2830,7 +2831,7 @@ static void test_menu_rows(void) {
     EXPECT(!strcmp(m.dyn[5], "SIN ALIADOS"));
     EXPECT(DuelMenu_ActivateRow(&m, 4) == DUEL_ACT_NONE);
     EXPECT(m.skirmish == 2);
-    EXPECT(DuelMenu_ActivateRow(&m, 6) == DUEL_ACT_START);
+    EXPECT(DuelMenu_ActivateRow(&m, 7) == DUEL_ACT_START);
     /* M19: RONDAS cycles 1/3/5 with wraparound (default 3). */
     EXPECT(m.series_best == 3);
     m.sel = 5;
@@ -2842,6 +2843,16 @@ static void test_menu_rows(void) {
     EXPECT(m.series_best == 5);
     EXPECT(DuelMenu_ActivateRow(&m, 5) == DUEL_ACT_NONE);
     EXPECT(m.series_best == 1);
+    /* MP-B1: MODO toggles skirmish/duel; brief lines follow. */
+    EXPECT(m.duel_mode == 0);
+    EXPECT(rows[6].kind == DUEL_ROW_CHOICE);
+    EXPECT(!strcmp(rows[6].label, "MODO"));
+    EXPECT(DuelMenu_ActivateRow(&m, 6) == DUEL_ACT_NONE);
+    EXPECT(m.duel_mode == 1);
+    EXPECT(!strcmp(m.dyn[4], "DUELO PVP 1V1"));
+    EXPECT(!strcmp(m.dyn[5], "RIVAL: OTRO PILOTO"));
+    EXPECT(DuelMenu_ActivateRow(&m, 6) == DUEL_ACT_NONE);
+    EXPECT(m.duel_mode == 0);
     /* M10: PAUSED gained RECENTRAR (quick recenter without OPTIONS). */
     DuelMenu_SetState(&m, DUEL_APP_PAUSED);
     n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
@@ -2893,6 +2904,12 @@ static void test_menu_values(void) {
     m.series_best = 1;
     DuelMenu_RowValue(&m, 5, val, sizeof(val));
     EXPECT(!strcmp(val, "1"));
+    /* MP-B1: MODO value tracks skirmish/duel. */
+    DuelMenu_RowValue(&m, 6, val, sizeof(val));
+    EXPECT(!strcmp(val, "ESCARAMUZA"));
+    m.duel_mode = 1;
+    DuelMenu_RowValue(&m, 6, val, sizeof(val));
+    EXPECT(!strcmp(val, "DUELO"));
     DuelMenu_SetState(&m, DUEL_APP_OPTIONS);
     m.vol_master = 0.8f;
     DuelMenu_RowValue(&m, 0, val, sizeof(val));
@@ -3285,7 +3302,7 @@ static void test_home_anchor(void) {
         DuelMenu_Init(&m);
         DuelMenu_SetState(&m, DUEL_APP_BRIEF);
         ph = DuelMenu_PanelH(&m);
-        EXPECT(ph > 0.25f && ph < 0.29f); /* 8-row brief fits the view */
+        EXPECT(ph > 0.28f && ph < 0.31f); /* 9-row brief fits the view */
     }
     printf("home_anchor ok\n");
 }
@@ -3330,7 +3347,7 @@ static void test_series(void) {
     /* BRIEF carries the RONDAS choice at row 5. */
     DuelMenu_SetState(&m, DUEL_APP_BRIEF);
     n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
-    EXPECT(n == 8);
+    EXPECT(n == 9);
     EXPECT(rows[5].kind == DUEL_ROW_CHOICE);
     EXPECT(!strcmp(rows[5].label, "RONDAS"));
     /* RESULT carries the series line under the pilot line. */
@@ -3477,6 +3494,78 @@ static void test_pausebtn(void) {
         EXPECT(DUEL_PAUSEBTN_PRESS_R < dm);
     }
     printf("pausebtn ok\n");
+}
+
+static void test_net_codec(void) {
+    /* MP-B1: snapshot/input codec roundtrip + rejects. */
+    DuelNetSnap s, d;
+    DuelNetInput in, di;
+    unsigned char buf[DUEL_NET_MAXDAT];
+    int len;
+    memset(&s, 0, sizeof(s));
+    s.seq = 12345;
+    s.time = 67.5f;
+    s.p_pos = duel_v3(1.0f, 2.0f, 3.0f);
+    s.p_orient = duel_q_axis_angle(duel_v3(0, 1, 0), 0.7f);
+    s.p_speed = 120.0f;
+    s.p_alive = 1;
+    s.r_pos = duel_v3(-4.0f, 5.0f, -600.0f);
+    s.r_orient = duel_q_identity();
+    s.r_speed = 40.0f;
+    s.r_alive = 1;
+    len = DuelNet_SnapEncode(&s, buf, sizeof(buf));
+    EXPECT(len == 100);
+    EXPECT(DuelNet_SnapDecode(buf, len, &d));
+    EXPECT(d.seq == 12345 && d.p_alive == 1 && d.r_alive == 1);
+    EXPECT(d.time == 67.5f && d.p_speed == 120.0f);
+    EXPECT(d.p_pos.x == 1.0f && d.r_pos.z == -600.0f);
+    EXPECT(d.p_orient.y == s.p_orient.y && d.p_orient.w == s.p_orient.w);
+    EXPECT(!DuelNet_SnapDecode(buf, len - 1, &d));
+    buf[0] ^= 0xFF;
+    EXPECT(!DuelNet_SnapDecode(buf, len, &d));
+    buf[0] ^= 0xFF;
+    buf[4] ^= 0xFF;
+    EXPECT(!DuelNet_SnapDecode(buf, len, &d));
+    EXPECT(DuelNet_SnapEncode(&s, buf, 99) == 0);
+    memset(&in, 0, sizeof(in));
+    in.seq = 7;
+    in.yaw = 0.5f;
+    in.pitch = -0.25f;
+    in.thr = 1.0f;
+    in.fire = 1;
+    len = DuelNet_InputEncode(&in, buf, sizeof(buf));
+    EXPECT(len == 32);
+    EXPECT(DuelNet_InputDecode(buf, len, &di));
+    EXPECT(di.seq == 7 && di.fire == 1);
+    EXPECT(di.yaw == 0.5f && di.pitch == -0.25f && di.thr == 1.0f);
+    EXPECT(!DuelNet_InputDecode(buf, 31, &di));
+    printf("net_codec ok\n");
+}
+
+static void test_drone_ai(void) {
+    /* MP-B1: chase pilot steers, ranges throttle, fires in the cone. */
+    DuelNetSnap v;
+    DuelNetInput out;
+    memset(&v, 0, sizeof(v));
+    v.p_alive = 1;
+    v.r_alive = 1;
+    v.p_pos = duel_v3(0.0f, 0.0f, -300.0f);
+    v.p_speed = 100.0f;
+    v.r_pos = duel_v3(0.0f, 0.0f, 0.0f);
+    v.r_orient = duel_q_identity();
+    v.r_speed = 40.0f;
+    DuelDrone_Step(&v, &out);
+    EXPECT(out.fire == 1); /* dead ahead, in range */
+    EXPECT(fabsf(out.yaw) < 0.05f && fabsf(out.pitch) < 0.05f);
+    EXPECT(out.thr == 1.0f); /* wants faster */
+    v.p_pos = duel_v3(300.0f, 0.0f, -100.0f);
+    DuelDrone_Step(&v, &out);
+    EXPECT(out.yaw > 0.3f); /* target right: nose right */
+    EXPECT(out.fire == 0);
+    v.p_alive = 0;
+    DuelDrone_Step(&v, &out);
+    EXPECT(out.fire == 0 && out.yaw == 0.0f && out.thr == 0.0f);
+    printf("drone_ai ok\n");
 }
 
 static void test_duel_pvp(void) {
@@ -3666,6 +3755,8 @@ int main(void) {
     test_panel_follow();
     test_pausebtn();
     test_duel_pvp();
+    test_net_codec();
+    test_drone_ai();
     if (fails == 0) printf("ALL DUEL TESTS PASS\n");
     else printf("%d FAILURES\n", fails);
     return fails == 0 ? 0 : 1;

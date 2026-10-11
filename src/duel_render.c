@@ -282,6 +282,8 @@ struct DuelRender {
     float last_hp_player, last_hp_tie[DUEL_TIE_COUNT], last_hp_ally[DUEL_ALLY_COUNT];
     int boom_player, boom_tie[DUEL_TIE_COUNT], boom_ally[DUEL_ALLY_COUNT]; /* explosion spawned */
     int seen_player, seen_tie[DUEL_TIE_COUNT], seen_ally[DUEL_ALLY_COUNT]; /* M12: seen alive (ghost gate) */
+    float last_hp_peer; /* MP-B1 duel peer fx memory */
+    int boom_peer, seen_peer, last_muzzle_peer;
     float flash;
     float shake;        /* impact camera shake 0..1 (decays in Update) */
     unsigned shake_seed;
@@ -1071,6 +1073,7 @@ DuelRender *DuelRender_Create(SDL_GPUDevice *device, SDL_GPUTextureFormat swap_f
     /* M2.2a: stars last -- the planet-disc cull reads r->env_tex. */
     build_stars(r);
     r->last_hp_player = DUEL_PLAYER_HP;
+    r->last_hp_peer = DUEL_PLAYER_HP; /* MP-B1 (seen-gated anyway) */
     { /* M5: per-ship fx memory */
         int k;
         for (k = 0; k < DUEL_TIE_COUNT; k++) {
@@ -1300,6 +1303,13 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
                                   s->allies[k].pos, 0.22f, 10.0f, 4.0f, 2.0f, 0.0f);
             }
         }
+        /* MP-B1: duel peer hit bursts (parked peer: hp==last, no-op). */
+        if (s->peer.hp < r->last_hp_peer - 0.01f && s->peer.alive) {
+            spawn_burst(r, s->peer.pos, 10.0f, 40.0f, 8, 0.6f, 1.0f, 0.8f, 0.3f);
+            spawn_burst(r, s->peer.pos, 5.0f, 25.0f, 4, 0.25f, 1.0f, 1.0f, 0.9f);
+            duel_sprite_spawn(r->sprites, DUEL_SPR_SLOTS, DUEL_SPR_SPARK, 1,
+                              s->peer.pos, 0.22f, 10.0f, 4.0f, 2.0f, 0.0f);
+        }
     }
     /* muzzle flash: white-hot pop at the gun that just fired */
     if (s->player.muzzle != r->last_muzzle_p) {
@@ -1341,12 +1351,25 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
                 r->last_muzzle_a[k] = s->allies[k].muzzle;
             }
         }
+        /* MP-B1: duel peer muzzle flash (X-Wing set, rebel colors). */
+        if (s->peer.muzzle != r->last_muzzle_peer) {
+            if (s->peer.muzzle > r->last_muzzle_peer && s->peer.alive) {
+                DuelVec3 at = Duel_MuzzleWorldAt(&s->peer, DUEL_SHIP_PEER,
+                                                 s->peer.muzzle - 1);
+                spawn_burst(r, at, 2.0f, 8.0f, 3, 0.12f, 1.0f, 0.9f, 0.75f);
+                spawn_burst(r, at, 1.0f, 4.0f, 2, 0.2f, 1.0f, 0.25f, 0.05f);
+                duel_sprite_spawn(r->sprites, DUEL_SPR_SLOTS, DUEL_SPR_SPARK, 1,
+                                  at, 0.12f, 3.0f, 1.2f, 2.5f, 0.0f);
+            }
+            r->last_muzzle_peer = s->peer.muzzle;
+        }
     }
     if (r->shake > 0.0f) {
         r->shake *= expf(-dt * 5.0f);
         if (r->shake < 0.003f) r->shake = 0.0f;
     }
     r->last_hp_player = s->player.hp;
+    r->last_hp_peer = s->peer.hp; /* MP-B1 */
     { /* M5 */
         int k;
         for (k = 0; k < DUEL_TIE_COUNT; k++) r->last_hp_tie[k] = s->ties[k].hp;
@@ -1388,6 +1411,15 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
                 r->flash = 1.0f;
             }
         }
+        /* MP-B1: duel peer staged explosion (self-latching seen gate). */
+        if (duel_fx_boom(&r->seen_peer, s->peer.alive, &r->boom_peer)) {
+            spawn_burst(r, s->peer.pos, 60.0f, 140.0f, 20, 0.25f, 1.0f, 1.0f, 0.95f);
+            spawn_burst(r, s->peer.pos, 20.0f, 90.0f, 60, 1.2f, 1.0f, 0.55f, 0.15f);
+            spawn_burst(r, s->peer.pos, 5.0f, 30.0f, 40, 2.6f, 0.7f, 0.2f, 0.05f);
+            duel_sprite_spawn(r->sprites, DUEL_SPR_SLOTS, DUEL_SPR_BOOM0, 2,
+                              s->peer.pos, 1.2f, 30.0f, 120.0f, 1.3f, 0.25f);
+            r->flash = 1.0f;
+        }
     }
     duel_sprite_update(r->sprites, DUEL_SPR_SLOTS, dt);
     /* M5: rearm ONLY on a fresh wave (everyone alive: exactly the
@@ -1395,12 +1427,16 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
      * the dead ships' explosions every frame mid-wave.
      * M10: compare against the WANTED counts (extras spawn dead). */
     if (s->phase == DUEL_PHASE_COMBAT && s->player.alive &&
-            Duel_TiesAlive(s) == Duel_TiesWanted(s) &&
-            Duel_AlliesAlive(s) == Duel_AlliesWanted(s)) {
+            (s->duel_mode ? s->peer.alive :
+             (Duel_TiesAlive(s) == Duel_TiesWanted(s) &&
+              Duel_AlliesAlive(s) == Duel_AlliesWanted(s)))) {
         int k;
         /* M12: rearm snapshots seen=alive (parked ships stay unseen). */
         r->boom_player = 0;
         r->seen_player = 1;
+        /* MP-B1: a fresh duel (both alive) rearms the peer boom. */
+        r->boom_peer = 0;
+        r->seen_peer = s->peer.alive ? 1 : 0;
         for (k = 0; k < DUEL_TIE_COUNT; k++) {
             r->boom_tie[k] = 0;
             r->seen_tie[k] = s->ties[k].alive ? 1 : 0;
@@ -3065,6 +3101,8 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
          * pip all follow it. */
         int tgt = Duel_AutoTarget(s);
         const DuelShip *tp = tgt >= 0 ? &s->ties[tgt] : NULL;
+        /* MP-B1: in a duel the cue + diamonds + lead pip follow the peer. */
+        if (s->duel_mode && s->peer.alive) tp = &s->peer;
         if (tp) {
             float gdx = 0.0f, gdy = 0.0f;
             if (Duel_HeadGuide(eq, cam_pos, tp->pos, &gdx, &gdy)) {
@@ -3135,6 +3173,8 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         /* M5: right bar follows the auto-target (nearest living tie). */
         int htgt = Duel_AutoTarget(s);
         float th = htgt >= 0 ? s->ties[htgt].hp / DUEL_TIE_HP : 0.0f;
+        /* MP-B1: in a duel the right bar is the peer's hull. */
+        if (s->duel_mode) th = s->peer.alive ? s->peer.hp / DUEL_PLAYER_HP : 0.0f;
         /* bg + fg for player (left) and tie (right) */
         struct { float x0, x1, frac, r, g, b; } bars[2] = {
             { -0.9f, -0.08f, ph, 0.2f, 1.0f, 0.3f },
@@ -3444,6 +3484,11 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
                 if (!s->allies[k].alive) continue;
                 DuelMat4 am = duel_model_matrix(s->allies[k].orient, s->allies[k].pos);
                 draw_model(r, NULL, cmd, rp, &r->xwing, vp.m, am.m, 0, 0, NULL);
+            }
+            /* MP-B1: duel peer exterior (same X-Wing; green bolts mark it). */
+            if (s->duel_mode && s->peer.alive) {
+                DuelMat4 pm = duel_model_matrix(s->peer.orient, s->peer.pos);
+                draw_model(r, NULL, cmd, rp, &r->xwing, vp.m, pm.m, 0, 0, NULL);
             }
         }
     }

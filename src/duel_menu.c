@@ -13,6 +13,11 @@ static const char *kDiffName[3] = { "FACIL", "NORMAL", "DIFICIL" };
  * change, and BATALLA cycle (rows point at these buffers). */
 static void duel_refresh_brief(DuelMenu *m) {
     int want = m->skirmish;
+    if (m->duel_mode) {
+        snprintf(m->dyn[4], sizeof(m->dyn[4]), "DUELO PVP 1V1");
+        snprintf(m->dyn[5], sizeof(m->dyn[5]), "RIVAL: OTRO PILOTO");
+        return;
+    }
     int allies;
     if (want < DUEL_SKIRMISH_MIN || want > DUEL_SKIRMISH_MAX)
         want = DUEL_SKIRMISH_DEFAULT;
@@ -42,6 +47,7 @@ void DuelMenu_Init(DuelMenu *m) {
     m->hover = -1;
     m->difficulty = DUEL_DIFF_ROOKIE; /* M9: EASY by default (user order) */
     m->skirmish = DUEL_SKIRMISH_DEFAULT; /* M10: 3v3 keeps M5/M9 battle */
+    m->duel_mode = 0; /* MP-B1: skirmish vs AI by default */
     m->series_best = 3; /* M19 rounds default */
     m->series_round = 0;
     m->series_won = 0;
@@ -131,6 +137,7 @@ int DuelMenu_Rows(const DuelMenu *m, DuelMenuRow *out, int cap) {
         ROW(DUEL_ROW_CHOICE, "DIFICULTAD", DUEL_ACT_NONE);
         ROW(DUEL_ROW_CHOICE, "BATALLA", DUEL_ACT_NONE);
         ROW(DUEL_ROW_CHOICE, "RONDAS", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "MODO", DUEL_ACT_NONE);
         ROW(DUEL_ROW_ACTION, "INICIAR", DUEL_ACT_START);
         ROW(DUEL_ROW_ACTION, "VOLVER", DUEL_ACT_BACK);
         break;
@@ -293,6 +300,11 @@ void DuelMenu_Adjust(DuelMenu *m, int dir) {
             duel_refresh_series(m);
             return;
         }
+        if (!strcmp(rows[m->sel].label, "MODO")) {
+            m->duel_mode = m->duel_mode ? 0 : 1;
+            duel_refresh_brief(m);
+            return;
+        }
         if (!strcmp(rows[m->sel].label, "BATALLA")) {
             m->skirmish += (dir > 0) ? 1 : -1;
             if (m->skirmish < DUEL_SKIRMISH_MIN)
@@ -361,6 +373,10 @@ void DuelMenu_RowValue(const DuelMenu *m, int row, char *out, int cap) {
             int b = (m->series_best == 1 || m->series_best == 5) ?
                 m->series_best : 3;
             snprintf(out, (size_t)cap, "%d", b);
+        /* MP-B1: MODO shows ESCARAMUZA/DUELO. */
+        } else if (!strcmp(rows[row].label, "MODO")) {
+            snprintf(out, (size_t)cap, "%s",
+                     m->duel_mode ? "DUELO" : "ESCARAMUZA");
         /* M10: BATALLA shows 1V1..5V5. */
         } else if (!strcmp(rows[row].label, "BATALLA")) {
             int w = m->skirmish;

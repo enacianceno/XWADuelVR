@@ -11,6 +11,7 @@
 #include "duel_input.h"
 #include "duel_math.h"
 #include "duel_menu.h"
+#include "duel_net.h"
 #include "duel_profile.h"
 #include "duel_render.h"
 #include "duel_sim.h"
@@ -70,6 +71,13 @@ int SDL_main(int argc, char **argv) {
     }
     DuelState sim;
     Duel_Init(&sim);
+    /* MP-B1 duel link (opened on the first duel start, localhost). */
+    DuelNet duel_net;
+    int duel_net_ok = 0;
+    DuelInput net_in;
+    Uint64 last_snap_us = 0;
+    int net_peer_live = 0;
+    memset(&net_in, 0, sizeof(net_in));
     DuelAudio *audio = NULL;
     {
         char adir[600];
@@ -290,7 +298,21 @@ int SDL_main(int argc, char **argv) {
                          * counts/HP use the menu values, not stale ones). */
                         Duel_SetDifficulty(&sim, menu.difficulty);
                         Duel_SetSkirmish(&sim, menu.skirmish);
-                        Duel_ResetCombat(&sim);
+                        if (menu.duel_mode) {
+                            Duel_ResetDuel(&sim);
+                            if (!duel_net_ok) {
+                                duel_net_ok = DuelNet_Open(&duel_net,
+                                        DUEL_NET_GAME_PORT);
+                                SDL_Log("DUEL_NET open %s port=%d",
+                                        duel_net_ok ? "ok" : "FAIL",
+                                        DUEL_NET_GAME_PORT);
+                            }
+                            memset(&net_in, 0, sizeof(net_in));
+                            net_peer_live = 0;
+                            last_snap_us = 0;
+                        } else {
+                            Duel_ResetCombat(&sim);
+                        }
                         /* M19 series: START opens round 1, REPEAT advances
                          * (a fresh series after the last round), RESTART
                          * replays the current round untouched. */
@@ -498,13 +520,58 @@ int SDL_main(int argc, char **argv) {
                     /* Destroyed beat: world animates, input neutral. */
                     DuelInput neutral;
                     memset(&neutral, 0, sizeof(neutral));
-                    Duel_Update(&sim, &neutral, dt);
+                    if (sim.duel_mode)
+                        Duel_UpdateDuel(&sim, &neutral, &neutral, dt);
+                    else
+                        Duel_Update(&sim, &neutral, dt);
+                } else if (sim.duel_mode) {
+                    DuelNetInput nin;
+                    if (duel_net_ok && DuelNet_RecvInput(&duel_net, &nin)) {
+                        net_in.yaw = nin.yaw;
+                        net_in.pitch = nin.pitch;
+                        net_in.roll = nin.roll;
+                        net_in.thr_axis = nin.thr;
+                        net_in.fire = nin.fire;
+                        if (!net_peer_live) {
+                            net_peer_live = 1;
+                            SDL_Log("DUEL_NET peer live");
+                        }
+                    }
+                    Duel_UpdateDuel(&sim, &in, &net_in, dt);
                 } else {
                     Duel_Update(&sim, &in, dt);
                 }
+                /* MP-B1: snapshot @20 Hz (combat + death beat: the peer
+                 * must see deaths and the winner). Localhost for now. */
+                if (sim.duel_mode && duel_net_ok) {
+                    Uint64 snow = SDL_GetTicksNS() / 1000u;
+                    if (snow - last_snap_us >= 1000000u / DUEL_NET_SNAP_HZ) {
+                        DuelNetSnap snap;
+                        unsigned char pkt[DUEL_NET_MAXDAT];
+                        int len;
+                        last_snap_us = snow;
+                        memset(&snap, 0, sizeof(snap));
+                        snap.seq = duel_net.next_seq++;
+                        snap.time = sim.time;
+                        snap.p_pos = sim.player.pos;
+                        snap.p_orient = sim.player.orient;
+                        snap.p_speed = sim.player.speed;
+                        snap.p_alive = sim.player.alive;
+                        snap.r_pos = sim.peer.pos;
+                        snap.r_orient = sim.peer.orient;
+                        snap.r_speed = sim.peer.speed;
+                        snap.r_alive = sim.peer.alive;
+                        snap.phase = (int)sim.phase;
+                        snap.winner = sim.duel_winner;
+                        len = DuelNet_SnapEncode(&snap, pkt, sizeof(pkt));
+                        if (len > 0)
+                            DuelNet_SendTo(&duel_net, pkt, len, "127.0.0.1",
+                                           DUEL_NET_DRONE_PORT);
+                    }
+                }
                 /* Sim auto-reset rebuilt the fight: freeze it, record
                  * the result ONCE, show the RESULT screen. */
-                if (prev_phase == DUEL_PHASE_DESTROYED &&
+                if (!sim.duel_mode && prev_phase == DUEL_PHASE_DESTROYED &&
                         sim.phase == DUEL_PHASE_COMBAT) {
                     int win = sim.player.alive ? 1 : 0;
                     int kills = sim.kills_player - combat_kills0;
@@ -524,6 +591,28 @@ int SDL_main(int argc, char **argv) {
                     SDL_Log("DUEL result: %s kills=%d pilot=%s",
                             win ? "VICTORIA" : "DERROTA",
                             menu.result_kills, menu.pilot.name);
+                }
+                /* MP-B1 duel: no auto-reset, so the result edge is the
+                 * latched winner after the death beat (stepping stops
+                 * on RESULT, so this fires once). */
+                if (sim.duel_mode && sim.phase == DUEL_PHASE_DESTROYED &&
+                        sim.phase_t >= DUEL_RESET_DELAY &&
+                        menu.state != DUEL_APP_RESULT) {
+                    int win = sim.duel_winner == 1 ? 1 : 0;
+                    menu.result_win = win;
+                    menu.result_kills = win ? 1 : 0;
+                    if (win) menu.series_won++;
+                    if (menu.pilot_idx >= 0) {
+                        DuelPilot_Record(&menu.pilot, win,
+                                         menu.result_kills, menu.difficulty);
+                        DuelPilot_Save(&menu.pilot, prof_dir);
+                        DuelMenu_RefreshPilots(&menu);
+                    }
+                    DuelMenu_SetState(&menu, DUEL_APP_RESULT);
+                    DuelRender_ClearGrabs(render);
+                    SDL_Log("DUEL duel result: %s winner=%d pilot=%s",
+                            win ? "VICTORIA" : "DERROTA",
+                            sim.duel_winner, menu.pilot.name);
                 }
                 prev_phase = sim.phase;
             }
@@ -640,6 +729,7 @@ int SDL_main(int argc, char **argv) {
         }
     }
     SDL_Log("DUEL shutdown");
+    if (duel_net_ok) DuelNet_Close(&duel_net);
     DuelAudio_Destroy(audio);
     DuelRender_Destroy(render);
     DuelInput_Shutdown();

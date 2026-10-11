@@ -791,6 +791,18 @@ def main():
           and "series_best" in menu_hdr
           and "series_line" in menu_hdr
           and '"RONDA %d DE %d GANADAS: %d"' in menu_text)
+    # MP-B1: MODO choice (ESCARAMUZA/DUELO) drives the duel sim; the
+    # peer renders with target cue + hull bar in duel mode.
+    check("MP-B1 MODO duel choice + sim wiring",
+          '"MODO"' in menu_text
+          and '"ESCARAMUZA"' in menu_text
+          and '"DUELO"' in menu_text
+          and "Duel_ResetDuel" in main_text
+          and "Duel_UpdateDuel" in main_text)
+    check("MP-B1 peer rendered in duel mode",
+          "duel_model_matrix(s->peer.orient, s->peer.pos)" in text
+          and "tp = &s->peer" in text
+          and "s->peer.hp / DUEL_PLAYER_HP" in text)
     # M21: the floating box is gone (user never saw it; the touch
     # snapped to a REAL red button on the right panel). Only the state-
     # colored PAUSA label floats; the cockpit button is the visual.

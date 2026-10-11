@@ -11,6 +11,7 @@ set(M2 "C:/OpenXWA/XWAQuest/m2")
 add_library(XWADuelVR SHARED
     src/duel_main.c
     src/duel_sim.c
+    src/duel_net.c
     src/duel_sky.c
     src/duel_sprite.c
     src/duel_depth.c

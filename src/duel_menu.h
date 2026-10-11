@@ -68,6 +68,7 @@ typedef struct DuelMenu {
     /* Live option values (main applies + persists via profile). */
     int difficulty;           /* DuelDifficulty */
     int skirmish;             /* M10: battle size 1..5 ships per side */
+    int duel_mode;            /* MP-B1: 0 skirmish vs AI, 1 PvP duel */
     float vol_master, vol_music, vol_sfx; /* 0..1 */
     float sens;               /* 0.5..1.5, 1 = baseline */
     float dead;               /* 0.05..0.30, 0.15 = baseline */
