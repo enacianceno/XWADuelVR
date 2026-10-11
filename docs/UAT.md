@@ -1,20 +1,20 @@
 # UAT — Plan de prueba de usuario (XWADuelVR)
 
-Build bajo prueba: **3.30-M26-txt** (`XWADuelVR-M26-TXT-debug.apk`,
+Build bajo prueba: **3.30-MPB1-net** (`XWADuelVR-MPB1-NET-debug.apk`,
 paquete `org.openxwa.xwaduellvr`).
 Visor documentado: Quest con seguimiento de manos y mandos Touch.
 
 ## Instalación
 
 ```powershell
-adb install -r XWADuelVR-M26-TXT-debug.apk
+adb install -r XWADuelVR-MPB1-NET-debug.apk
 ```
 
 Sin desinstalar la anterior. Verifica la versión instalada:
 
 ```powershell
 adb shell dumpsys package org.openxwa.xwaduellvr | Select-String versionName
-# esperado: versionName=3.30-M26-txt
+# esperado: versionName=3.30-MPB1-net
 ```
 
 ## Casos de prueba
@@ -37,6 +37,14 @@ adb shell dumpsys package org.openxwa.xwaduellvr | Select-String versionName
    color al acercar/pulsar. Tocar el botón **C** no debe hacer nada.
 6. **Recentrado** — Desde el menú en pausa usa RECENTRAR. Esperado:
    el menú vuelve a su posición inicial frente al piloto.
+7. **Duelo vs dron (opcional, con adb)** — Instala el dron del
+   Release en el visor y arráncalo:
+   `adb push duel_drone /data/local/tmp/duel_drone`
+   `adb shell "chmod +x /data/local/tmp/duel_drone"`
+   `adb shell /data/local/tmp/duel_drone`
+   (déjalo corriendo). En el juego pon MODO: DUELO e INICIAR.
+   Esperado: X-Wing rival con diamante rojo que te persigue y
+   dispara verde; al morir alguien sale VICTORIA/DERROTA.
 
 ## Cómo reportar
 

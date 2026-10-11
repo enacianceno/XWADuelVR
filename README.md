@@ -16,7 +16,7 @@ GPU/Vulkan, OpenXR). **No requiere streaming desde un PC.**
 > Proyecto experimental de fans, en pruebas de usuario (UAT).
 > Estado revisado el **11 de octubre de 2026**.
 
-## Estado actual (M26-TXT, `3.30-M26-txt`)
+## Estado actual (MP-B1, `3.30-MPB1-net`)
 
 - **Combate:** X-Wing del jugador + 2 aliados vs oleadas TIE, rondas
   1/3/5 (por defecto 3), línea de resultado por ronda.
@@ -26,6 +26,9 @@ GPU/Vulkan, OpenXR). **No requiere streaming desde un PC.**
   pellizco, sigue a la mano (tableta en mano), escala x0.42.
 - **Pausa:** botón rojo físico "A" de la consola derecha pausa el
   juego y trae el menú; etiqueta PAUSA ámbar/blanca/verde.
+- **Duelo (nuevo):** MODO DUELO en el brief: X-Wing vs X-Wing por
+  red contra el piloto dron (`duel_drone` por adb); el rival
+  persigue, dispara y el duelo termina con ganador.
 - **Probado en:** Quest del autor con seguimiento de manos y mandos
   Touch. Sin validación en otros visores.
 
@@ -36,10 +39,11 @@ Hay una APK lista en
 Si tienes un Quest 3/3S con modo desarrollador:
 
 1. Instala sin desinstalar la anterior:
-   `adb install -r XWADuelVR-M26-TXT-debug.apk`
+   `adb install -r XWADuelVR-MPB1-NET-debug.apk`
    (paquete `org.openxwa.xwaduellvr`).
 2. Sigue el plan de prueba en [docs/UAT.md](docs/UAT.md):
-   menú, tablet, combate, rondas, botón de pausa, recentrado.
+   menú, tablet, combate, rondas, botón de pausa, recentrado
+   y duelo contra el dron.
 3. Reporta con la plantilla de [docs/UAT.md](docs/UAT.md):
    visor, build, pasos, esperado vs observado, foto o video.
 

@@ -7,7 +7,7 @@ title: "[UAT] "
 ## Entorno
 
 - Visor: (p. ej. Quest 3S)
-- Build: (p. ej. 3.30-M26-txt, ver Releases)
+- Build: (p. ej. 3.30-MPB1-net, ver Releases)
 - Mandos / manos: (Touch / hand tracking)
 
 ## Caso probado
