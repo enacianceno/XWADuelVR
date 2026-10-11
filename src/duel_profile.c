@@ -107,7 +107,8 @@ static int duel_pilot_path(char *out, size_t cap, const char *dir,
 void DuelPilot_Defaults(DuelPilot *p, const char *name) {
     memset(p, 0, sizeof(*p));
     duel_pilot_sanitize(name, p->name);
-    p->last_diff = 1; /* PILOT baseline */
+    p->last_diff = 0; /* M9: ROOKIE default (user order; PILOT stays the
+                           * sim baseline, menu/selector default is EASY) */
     p->last_win = -1;
 }
 

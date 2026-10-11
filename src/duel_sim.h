@@ -9,11 +9,16 @@
 typedef enum DuelShipKind { DUEL_SHIP_PLAYER = 0, DUEL_SHIP_TIE = 1,
                             DUEL_SHIP_ALLY = 2 } DuelShipKind;
 
-/* M5 skirmish: 3 TIEs vs player + 2 X-wing allies. Bolts only ever hit
- * the ENEMY team (rebel bolts -> ties; imperial bolts -> rebels), so no
- * friendly fire in either direction and no shooter-id bookkeeping. */
-#define DUEL_TIE_COUNT 3
-#define DUEL_ALLY_COUNT 2
+/* M5 skirmish: up to 5 TIEs vs player + up to 4 X-wing allies.
+ * Bolts only ever hit the ENEMY team (rebel bolts -> ties; imperial
+ * bolts -> rebels), so no friendly fire in either direction and no
+ * shooter-id bookkeeping. M10: battle size 1v1..5v5 (menu); inactive
+ * ships spawn parked and dead. */
+#define DUEL_TIE_COUNT 5
+#define DUEL_ALLY_COUNT 4
+#define DUEL_SKIRMISH_MIN 1
+#define DUEL_SKIRMISH_MAX 5
+#define DUEL_SKIRMISH_DEFAULT 3 /* 3v3 = the frozen M5/M6/M9 battle */
 
 typedef struct DuelShip {
     DuelVec3 pos;
@@ -87,6 +92,10 @@ typedef struct DuelState {
      * (default 0.15 = DUEL_DEADZONE; controllers keep the #define). */
     int diff;
     float hand_dead;
+    /* M10: battle size 1..5 (ships per side; player counts for rebels).
+     * Wanted TIEs = skirmish, wanted allies = skirmish - 1. Survives
+     * combat resets (menu-owned, like diff). */
+    int skirmish;
 } DuelState;
 
 void Duel_Init(DuelState *s);
@@ -102,6 +111,8 @@ void Duel_HandLever(DuelState *s, int active, float roll);
  * hand-lever deadzone (clamped 0.05..0.30, default 0.15). */
 void Duel_SetDifficulty(DuelState *s, int diff);
 void Duel_SetHandDead(DuelState *s, float dead);
+/* M10 menu: battle size (clamped 1..5, survives combat resets). */
+void Duel_SetSkirmish(DuelState *s, int n);
 
 /* Steering helper (also used by tests): turn 'orient' toward 'dir'. */
 DuelQuat Duel_SteerToward(DuelQuat orient, DuelVec3 dir, float max_rad, float dt);
@@ -112,6 +123,10 @@ int Duel_AutoTarget(const DuelState *s);
 /* M5: living ships per side (wave/pacing logic). */
 int Duel_TiesAlive(const DuelState *s);
 int Duel_AlliesAlive(const DuelState *s);
+/* M10: wanted ships per side for the current battle size (fresh-wave
+ * reference: a full wave has exactly these alive). */
+int Duel_TiesWanted(const DuelState *s);
+int Duel_AlliesWanted(const DuelState *s);
 
 /* Muzzle world position for a shot with index 'muzzle_index' (pure; the
  * single source of truth for duel_fire AND the render-side muzzle flash). */

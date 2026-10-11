@@ -19,6 +19,9 @@
 #include "duel_sprite.h"
 #include "flight_config.h"
 
+#define CGLTF_IMPLEMENTATION
+#include "cgltf.h"
+
 #define EXPECT(cond) do { \
     if (!(cond)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); fails++; } \
 } while (0)
@@ -58,8 +61,12 @@ static void test_flight(void) {
     EXPECT(s.phase == DUEL_PHASE_COMBAT);
     EXPECT(s.player.alive && s.ties[0].alive && s.ties[1].alive && s.ties[2].alive);
     EXPECT(s.allies[0].alive && s.allies[1].alive);
-    EXPECT(Duel_TiesAlive(&s) == DUEL_TIE_COUNT);
-    EXPECT(Duel_AlliesAlive(&s) == DUEL_ALLY_COUNT);
+    /* M10: default battle is 3v3; extra slots spawn parked and dead. */
+    EXPECT(Duel_TiesAlive(&s) == Duel_TiesWanted(&s));
+    EXPECT(Duel_AlliesAlive(&s) == Duel_AlliesWanted(&s));
+    EXPECT(Duel_TiesWanted(&s) == 3 && Duel_AlliesWanted(&s) == 2);
+    EXPECT(!s.ties[3].alive && !s.ties[4].alive);
+    EXPECT(!s.allies[2].alive && !s.allies[3].alive);
     /* Full throttle climbs speed toward max. */
     DuelInput in;
     memset(&in, 0, sizeof(in));
@@ -159,7 +166,7 @@ static void test_reset_loop(void) {
     memset(&in, 0, sizeof(in));
     Duel_Update(&s, &in, 1.0f / 60.0f);
     EXPECT(s.phase == DUEL_PHASE_COMBAT);
-    EXPECT(Duel_TiesAlive(&s) == DUEL_TIE_COUNT - 1);
+    EXPECT(Duel_TiesAlive(&s) == Duel_TiesWanted(&s) - 1);
     s.ties[1].alive = 0; s.ties[1].hp = 0;
     s.ties[2].alive = 0; s.ties[2].hp = 0;
     Duel_Update(&s, &in, 1.0f / 60.0f);
@@ -469,7 +476,7 @@ static float qdot(DuelQuat a, DuelQuat b) {
 }
 
 /* Seat literal: must match DUEL_SEAT_POS in duel_render.c. */
-static DuelVec3 test_seat(void) { return duel_v3(0.0f, 0.75f, -0.88f); } /* M3.0b POV +10cm back/+5cm up */
+static DuelVec3 test_seat(void) { return duel_v3(0.0f, 0.75f, -0.78f); } /* M4g POV +10cm back */
 
 static void test_head_does_not_change_cockpit_world(void) {
     /* cockpitWorld = ship x opt_basis: the builder takes NO head input,
@@ -2042,6 +2049,9 @@ static void test_grab_release(void) {
     for (i = 0; i < DUEL_GRAB_HOLD_FRAMES; i++)
         DuelGrab_Update(&g, 1, 0.10f, DUEL_GRAB_PINCH_SHUT, 0.10f);
     EXPECT(g.state == DUEL_GRAB_HELD);
+    /* M20: a hard yank (30 cm out) with the grip shut still holds. */
+    DuelGrab_Update(&g, 1, 0.10f, DUEL_GRAB_PINCH_SHUT, 0.30f);
+    EXPECT(g.state == DUEL_GRAB_HELD);
     /* single open frame is tolerated */
     DuelGrab_Update(&g, 1, 0.10f, DUEL_GRAB_PINCH_OPEN, 0.10f);
     EXPECT(g.state == DUEL_GRAB_HELD);
@@ -2659,7 +2669,8 @@ static void test_grab_fist(void) {
                      DUEL_FIST_SHUT, DUEL_FIST_OPEN,
                      DUEL_GRAB_STICK_LATCH_R, DUEL_GRAB_LOSE_R);
     EXPECT(g.state == DUEL_GRAB_HELD);
-    DuelGrab_UpdateT(&g, 1, 0.07f, 0.08f, 0.25f,
+    /* M20: yank past the (widened) release radius: instant reset. */
+    DuelGrab_UpdateT(&g, 1, 0.07f, 0.08f, DUEL_GRAB_LOSE_R,
                      DUEL_FIST_SHUT, DUEL_FIST_OPEN,
                      DUEL_GRAB_STICK_LATCH_R, DUEL_GRAB_LOSE_R);
     EXPECT(g.state == DUEL_GRAB_FAR); /* yanked: instant reset */
@@ -2768,7 +2779,7 @@ static void test_menu_rows(void) {
     /* BRIEF: labels skipped by nav + rect/hit. */
     DuelMenu_SetState(&m, DUEL_APP_BRIEF);
     n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
-    EXPECT(n == 6);
+    EXPECT(n == 8); /* M10: + BATALLA, M19: + RONDAS choice */
     EXPECT(m.sel == 3); /* DIFICULTAD choice */
     {
         float x0, y0, x1, y1;
@@ -2790,15 +2801,53 @@ static void test_menu_rows(void) {
             }
         }
     }
-    /* Choice click cycles with wraparound. */
+    /* Choice click cycles with wraparound. M9: EASY is the default. */
+    EXPECT(m.difficulty == DUEL_DIFF_ROOKIE);
+    EXPECT(DuelMenu_ActivateRow(&m, 3) == DUEL_ACT_NONE);
     EXPECT(m.difficulty == DUEL_DIFF_PILOT);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.difficulty == DUEL_DIFF_ACE);
+    DuelMenu_Adjust(&m, -1);
+    EXPECT(m.difficulty == DUEL_DIFF_PILOT);
+    /* M10: choice click acts on the clicked row even when sel is elsewhere
+     * (touch taps a row without moving the controller selection first). */
+    m.sel = 6; /* INICIAR */
     EXPECT(DuelMenu_ActivateRow(&m, 3) == DUEL_ACT_NONE);
     EXPECT(m.difficulty == DUEL_DIFF_ACE);
+    EXPECT(m.sel == 3);
+    /* M10: BATALLA cycles 1..5 with wraparound; brief lines follow. */
+    EXPECT(m.skirmish == 3);
+    m.sel = 4;
     DuelMenu_Adjust(&m, 1);
-    EXPECT(m.difficulty == DUEL_DIFF_ROOKIE);
+    EXPECT(m.skirmish == 4);
+    EXPECT(!strcmp(m.dyn[4], "X-WING VS 4 TIE"));
+    EXPECT(!strcmp(m.dyn[5], "ALIADOS: 3 X-WING"));
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.skirmish == 5);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.skirmish == 1); /* wrap */
+    EXPECT(!strcmp(m.dyn[4], "X-WING VS 1 TIE"));
+    EXPECT(!strcmp(m.dyn[5], "SIN ALIADOS"));
+    EXPECT(DuelMenu_ActivateRow(&m, 4) == DUEL_ACT_NONE);
+    EXPECT(m.skirmish == 2);
+    EXPECT(DuelMenu_ActivateRow(&m, 6) == DUEL_ACT_START);
+    /* M19: RONDAS cycles 1/3/5 with wraparound (default 3). */
+    EXPECT(m.series_best == 3);
+    m.sel = 5;
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.series_best == 5);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.series_best == 1); /* wrap */
     DuelMenu_Adjust(&m, -1);
-    EXPECT(m.difficulty == DUEL_DIFF_ACE);
-    EXPECT(DuelMenu_ActivateRow(&m, 4) == DUEL_ACT_START);
+    EXPECT(m.series_best == 5);
+    EXPECT(DuelMenu_ActivateRow(&m, 5) == DUEL_ACT_NONE);
+    EXPECT(m.series_best == 1);
+    /* M10: PAUSED gained RECENTRAR (quick recenter without OPTIONS). */
+    DuelMenu_SetState(&m, DUEL_APP_PAUSED);
+    n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+    EXPECT(n == 5);
+    EXPECT(m.sel == 0);
+    EXPECT(DuelMenu_ActivateRow(&m, 2) == DUEL_ACT_RECENTER);
     /* OPTIONS sliders: drag + step clamp. */
     DuelMenu_SetState(&m, DUEL_APP_OPTIONS);
     DuelMenu_SetSlider(&m, 0, 0.5f);
@@ -2829,6 +2878,21 @@ static void test_menu_values(void) {
     m.difficulty = DUEL_DIFF_ROOKIE;
     DuelMenu_RowValue(&m, 3, val, sizeof(val));
     EXPECT(!strcmp(val, "FACIL"));
+    /* M10: BATALLA value tracks the battle size. */
+    DuelMenu_RowValue(&m, 4, val, sizeof(val));
+    EXPECT(!strcmp(val, "3V3"));
+    m.skirmish = 1;
+    DuelMenu_RowValue(&m, 4, val, sizeof(val));
+    EXPECT(!strcmp(val, "1V1"));
+    m.skirmish = 5;
+    DuelMenu_RowValue(&m, 4, val, sizeof(val));
+    EXPECT(!strcmp(val, "5V5"));
+    /* M19: RONDAS value tracks the series length. */
+    DuelMenu_RowValue(&m, 5, val, sizeof(val));
+    EXPECT(!strcmp(val, "3"));
+    m.series_best = 1;
+    DuelMenu_RowValue(&m, 5, val, sizeof(val));
+    EXPECT(!strcmp(val, "1"));
     DuelMenu_SetState(&m, DUEL_APP_OPTIONS);
     m.vol_master = 0.8f;
     DuelMenu_RowValue(&m, 0, val, sizeof(val));
@@ -2947,6 +3011,474 @@ static void test_difficulty(void) {
     printf("difficulty ok\n");
 }
 
+/* M9: visible highlight = hand hover when pointing, else controller sel;
+ * activation follows it so highlight and action never disagree. */
+static void test_menu_highlight(void) {
+    DuelMenu m;
+    DuelMenu_Init(&m);
+    EXPECT(DuelMenu_Highlighted(NULL) == -1);
+    EXPECT(DuelMenu_Highlighted(&m) == 0); /* sel, no hover */
+    EXPECT(DuelMenu_Activate(&m) == DUEL_ACT_ENTER_BRIEF);
+    m.hover = 2;
+    EXPECT(DuelMenu_Highlighted(&m) == 2); /* hover wins */
+    EXPECT(DuelMenu_Activate(&m) == DUEL_ACT_ENTER_OPTIONS);
+    m.hover = -1;
+    DuelMenu_Nav(&m, 1);
+    EXPECT(DuelMenu_Highlighted(&m) == 1);
+    EXPECT(DuelMenu_Activate(&m) == DUEL_ACT_ENTER_PILOTS);
+    printf("menu_highlight ok\n");
+}
+
+/* M9 EASY envelope: earlier breaks, tighter/shorter fire gate, slower
+ * refire, brisker passes, crossing reacquire. Pilot behavior pinned
+ * unchanged beside each easy case. */
+static void duel_easy_setup(DuelState *s, int diff) {
+    int k;
+    Duel_Init(s);
+    Duel_SetDifficulty(s, diff);
+    Duel_ResetCombat(s);
+    /* Deterministic furball: only tie[0] flies, player parked at origin. */
+    for (k = 1; k < DUEL_TIE_COUNT; k++) {
+        s->ties[k].alive = 0;
+        s->ties[k].hp = 0.0f;
+    }
+    for (k = 0; k < DUEL_ALLY_COUNT; k++) {
+        s->allies[k].alive = 0;
+        s->allies[k].hp = 0.0f;
+    }
+    s->player.pos = duel_v3(0, 0, 0);
+    s->player.orient = duel_q_identity();
+    s->player.speed = 0.0f;
+    s->player.throttle = 0.0f;
+    s->player.hp = DUEL_PLAYER_HP;
+    s->ties[0].speed = 0.0f;
+    s->ties[0].fire_cd = 0.0f;
+}
+
+static void test_easy_envelope(void) {
+    DuelState e, p;
+    DuelInput in;
+    memset(&in, 0, sizeof(in));
+    /* (a) CHASE at 100 m, facing away: easy breaks, pilot holds. */
+    duel_easy_setup(&e, 0);
+    duel_easy_setup(&p, 1);
+    e.ties[0].pos = duel_v3(100, 0, 0);
+    p.ties[0].pos = duel_v3(100, 0, 0);
+    e.ties[0].orient = duel_q_identity();
+    p.ties[0].orient = e.ties[0].orient; /* fwd=-Z, perpendicular to -X */
+    e.ai[0] = DUEL_TIE_CHASE; e.ai_t[0] = 0.0f;
+    p.ai[0] = DUEL_TIE_CHASE; p.ai_t[0] = 0.0f;
+    Duel_Update(&e, &in, 1.0f / 60.0f);
+    Duel_Update(&p, &in, 1.0f / 60.0f);
+    EXPECT(e.ai[0] == DUEL_TIE_EVADE); /* 100 < 130 */
+    EXPECT(p.ai[0] == DUEL_TIE_CHASE); /* 100 > 80 */
+    EXPECT_NEAR(e.ties[0].throttle, 0.65f, 1e-6f);
+    EXPECT_NEAR(p.ties[0].throttle, 0.5f, 1e-6f);
+    /* (b) ATTACK at 650 m, dead-on: easy falls back, pilot fires. */
+    duel_easy_setup(&e, 0);
+    duel_easy_setup(&p, 1);
+    e.ties[0].pos = duel_v3(650, 0, 0);
+    p.ties[0].pos = duel_v3(650, 0, 0);
+    /* Facing -X (at the player): yaw +90 deg. */
+    e.ties[0].orient = duel_q_axis_angle(duel_v3(0, 1, 0), DUEL_PI / 2.0f);
+    p.ties[0].orient = e.ties[0].orient;
+    e.ai[0] = DUEL_TIE_ATTACK; e.ai_t[0] = 0.0f;
+    p.ai[0] = DUEL_TIE_ATTACK; p.ai_t[0] = 0.0f;
+    {
+        int mzl_p0 = p.ties[0].muzzle;
+        Duel_Update(&e, &in, 1.0f / 60.0f);
+        Duel_Update(&p, &in, 1.0f / 60.0f);
+        EXPECT(e.ai[0] == DUEL_TIE_CHASE); /* 650 > 500*1.2 */
+        EXPECT(p.ai[0] == DUEL_TIE_ATTACK); /* 650 < 700 */
+        EXPECT(p.ties[0].muzzle == mzl_p0 + 1); /* pilot fired */
+        EXPECT_NEAR(p.ties[0].fire_cd, 0.75f, 1e-4f);
+        EXPECT_NEAR(e.ties[0].throttle, 0.85f, 1e-6f);
+        EXPECT_NEAR(p.ties[0].throttle, 0.70f, 1e-6f);
+    }
+    /* (c) ATTACK at 400 m, dead-on: both fire, easy refires slower. */
+    duel_easy_setup(&e, 0);
+    duel_easy_setup(&p, 1);
+    e.ties[0].pos = duel_v3(400, 0, 0);
+    p.ties[0].pos = duel_v3(400, 0, 0);
+    e.ties[0].orient = duel_q_axis_angle(duel_v3(0, 1, 0), DUEL_PI / 2.0f);
+    p.ties[0].orient = e.ties[0].orient;
+    e.ai[0] = DUEL_TIE_ATTACK; e.ai_t[0] = 0.0f;
+    p.ai[0] = DUEL_TIE_ATTACK; p.ai_t[0] = 0.0f;
+    {
+        int mzl_e0 = e.ties[0].muzzle, mzl_p0 = p.ties[0].muzzle;
+        Duel_Update(&e, &in, 1.0f / 60.0f);
+        Duel_Update(&p, &in, 1.0f / 60.0f);
+        EXPECT(e.ai[0] == DUEL_TIE_ATTACK && p.ai[0] == DUEL_TIE_ATTACK);
+        EXPECT(e.ties[0].muzzle == mzl_e0 + 1);
+        EXPECT(p.ties[0].muzzle == mzl_p0 + 1);
+        EXPECT_NEAR(e.ties[0].fire_cd, 0.75f * 1.6f, 1e-4f);
+        EXPECT_NEAR(p.ties[0].fire_cd, 0.75f, 1e-4f);
+    }
+    /* (d) REACQUIRE from astern: easy turns toward the crossing point
+     * (+X tilt), pilot turns straight at the player (no X). */
+    duel_easy_setup(&e, 0);
+    duel_easy_setup(&p, 1);
+    e.ties[0].pos = duel_v3(0, 5, 500); /* +5 up: not exactly antiparallel */
+    p.ties[0].pos = duel_v3(0, 5, 500);
+    e.ties[0].orient = duel_q_axis_angle(duel_v3(0, 1, 0), DUEL_PI);
+    p.ties[0].orient = e.ties[0].orient; /* fwd=+Z, away */
+    e.ai[0] = DUEL_TIE_REACQUIRE; e.ai_t[0] = 0.0f;
+    p.ai[0] = DUEL_TIE_REACQUIRE; p.ai_t[0] = 0.0f;
+    Duel_Update(&e, &in, 0.1f);
+    Duel_Update(&p, &in, 0.1f);
+    EXPECT(e.ai[0] == DUEL_TIE_REACQUIRE && p.ai[0] == DUEL_TIE_REACQUIRE);
+    {
+        DuelVec3 ef = duel_q_forward(e.ties[0].orient);
+        DuelVec3 pf = duel_q_forward(p.ties[0].orient);
+        EXPECT(ef.x > 1e-3f); /* crossing tilt toward +X */
+        EXPECT(fabsf(pf.x) < 1e-6f); /* straight back at the player */
+    }
+    printf("easy_envelope ok\n");
+}
+
+/* M10 home view: death resets restore the first reference (boot or
+ * latest explicit recenter) instead of the death head pose. */
+static void test_home_view(void) {
+    DuelSeatCal cal;
+    DuelVec3 boot_p = duel_v3(1.0f, 2.0f, 3.0f);
+    DuelQuat boot_q = duel_q_axis_angle(duel_v3(0, 1, 0), 0.3f);
+    DuelVec3 rec_p = duel_v3(4.0f, 5.0f, 6.0f);
+    DuelQuat rec_q = duel_q_axis_angle(duel_v3(0, 1, 0), 1.0f);
+    DuelVec3 cp;
+    DuelQuat cq;
+    memset(&cal, 0, sizeof(cal));
+    /* Restore without a home is a no-op (never bricks capture). */
+    duel_cal_home_restore(&cal);
+    EXPECT(!cal.valid && cal.generation == 0 && !cal.home_valid);
+    duel_cal_home_store(&cal); /* invalid cal stores nothing */
+    EXPECT(!cal.home_valid);
+    /* Boot capture becomes home. */
+    duel_cal_capture(&cal, boot_p, boot_q, DUEL_CAL_INIT);
+    duel_cal_home_store(&cal);
+    EXPECT(cal.home_valid);
+    EXPECT_NEAR(cal.home_pos.x, 1.0f, 1e-6f);
+    EXPECT_NEAR(cal.home_yaw, 0.3f, 1e-5f);
+    /* Explicit recenter moves home. */
+    duel_cal_capture(&cal, rec_p, rec_q, DUEL_CAL_RECENTER);
+    duel_cal_home_store(&cal);
+    EXPECT_NEAR(cal.home_pos.x, 4.0f, 1e-6f);
+    /* Death: head turned away; restore returns the recenter reference. */
+    duel_cal_capture(&cal, duel_v3(9.0f, 9.0f, 9.0f),
+                     duel_q_axis_angle(duel_v3(0, 1, 0), -2.0f),
+                     DUEL_CAL_RESET);
+    {
+        int g0 = cal.generation;
+        duel_cal_home_restore(&cal);
+        EXPECT(cal.generation == g0 + 1 && cal.reason == DUEL_CAL_RESET);
+        EXPECT(cal.valid);
+    }
+    duel_cal_neutralize(&cal, rec_p, rec_q, &cp, &cq);
+    EXPECT_NEAR(cp.x, 0.0f, 1e-5f); EXPECT_NEAR(cp.y, 0.0f, 1e-5f);
+    EXPECT_NEAR(cp.z, 0.0f, 1e-5f);
+    EXPECT_NEAR(duel_yaw_of(cq), 0.0f, 1e-4f);
+    printf("home_view ok\n");
+}
+
+/* M10 touch menus: press level with hysteresis (pure helper). */
+static void test_touch_level(void) {
+    int p = 0;
+    DuelTouch_Level(NULL, 0.0f, 1); /* null-safe */
+    DuelTouch_Level(&p, 0.50f, 1);
+    EXPECT(p == 0); /* far: released */
+    DuelTouch_Level(&p, 0.03f, 1);
+    EXPECT(p == 0); /* approaching, not yet */
+    DuelTouch_Level(&p, 0.02f, 1);
+    EXPECT(p == 1); /* press depth */
+    DuelTouch_Level(&p, -0.05f, 1);
+    EXPECT(p == 1); /* through the plane: held */
+    DuelTouch_Level(&p, -0.10f, 1);
+    EXPECT(p == 1); /* past tolerance: still held (release is frontal) */
+    DuelTouch_Level(&p, 0.04f, 1);
+    EXPECT(p == 1); /* inside the band: held */
+    DuelTouch_Level(&p, 0.06f, 1);
+    EXPECT(p == 0); /* withdrawn past release */
+    DuelTouch_Level(&p, 0.01f, 1);
+    EXPECT(p == 1);
+    DuelTouch_Level(&p, 0.01f, 0);
+    EXPECT(p == 0); /* slid off-panel: released */
+    printf("touch_level ok\n");
+}
+
+/* M10 battle sizes 1v1..5v5: wanted counts, spawn alive sets, clamp,
+ * reset survival, and wave-end per size. */
+static void test_skirmish(void) {
+    DuelState s;
+    int n;
+    Duel_SetSkirmish(&s, 99);
+    EXPECT(s.skirmish == 5);
+    Duel_SetSkirmish(&s, -99);
+    EXPECT(s.skirmish == 1);
+    for (n = 1; n <= 5; n++) {
+        int k;
+        Duel_Init(&s);
+        Duel_SetSkirmish(&s, n);
+        Duel_ResetCombat(&s);
+        EXPECT(s.skirmish == n); /* survives reset */
+        EXPECT(Duel_TiesWanted(&s) == n);
+        EXPECT(Duel_AlliesWanted(&s) == n - 1);
+        EXPECT(Duel_TiesAlive(&s) == n);
+        EXPECT(Duel_AlliesAlive(&s) == n - 1);
+        for (k = 0; k < DUEL_TIE_COUNT; k++)
+            EXPECT(s.ties[k].alive == (k < n ? 1 : 0));
+        for (k = 0; k < DUEL_ALLY_COUNT; k++)
+            EXPECT(s.allies[k].alive == (k < n - 1 ? 1 : 0));
+        /* Parked extras still have sane spawn poses (facing player). */
+        for (k = n; k < DUEL_TIE_COUNT; k++) {
+            DuelVec3 kf = duel_q_forward(s.ties[k].orient);
+            DuelVec3 kp = duel_v3_norm(
+                duel_v3_sub(s.player.pos, s.ties[k].pos));
+            EXPECT(duel_v3_dot(kf, kp) > 0.99f);
+        }
+        /* Killing the wanted ties ends the wave at any size. */
+        for (k = 0; k < n; k++) {
+            s.ties[k].alive = 0;
+            s.ties[k].hp = 0.0f;
+        }
+        {
+            DuelInput in;
+            memset(&in, 0, sizeof(in));
+            Duel_Update(&s, &in, 1.0f / 60.0f);
+        }
+        EXPECT(s.phase == DUEL_PHASE_DESTROYED);
+    }
+    /* 1v1: no allies, auto-target still finds the duel. */
+    Duel_Init(&s);
+    Duel_SetSkirmish(&s, 1);
+    Duel_ResetCombat(&s);
+    EXPECT(Duel_AlliesAlive(&s) == 0);
+    EXPECT(Duel_AutoTarget(&s) == 0);
+    printf("skirmish ok\n");
+}
+
+/* M11 near home panel: LOCAL anchor for a seat-frame point roundtrips
+ * through neutralize exactly (cockpit-fixed panel); size pins. */
+static void test_home_anchor(void) {
+    DuelSeatCal cal;
+    DuelVec3 off = duel_v3(0, 0, -DUEL_MENU_DIST);
+    DuelVec3 ap, rp;
+    DuelQuat aq, rq;
+    memset(&cal, 0, sizeof(cal));
+    duel_cal_capture(&cal, duel_v3(1.0f, 2.0f, 3.0f),
+                     duel_q_axis_angle(duel_v3(0, 1, 0), 0.3f),
+                     DUEL_CAL_INIT);
+    duel_home_anchor(&cal, off, &ap, &aq);
+    duel_cal_neutralize(&cal, ap, aq, &rp, &rq);
+    EXPECT_NEAR(rp.x, off.x, 1e-5f);
+    EXPECT_NEAR(rp.y, off.y, 1e-5f);
+    EXPECT_NEAR(rp.z, off.z, 1e-5f);
+    EXPECT_NEAR(duel_yaw_of(rq), 0.0f, 1e-4f);
+    EXPECT_NEAR(duel_v3_len(duel_v3_sub(ap, cal.neutral_pos)),
+                DUEL_MENU_DIST, 1e-5f);
+    /* Near-panel size pins (M11 requirement, M19 x0.42 smaller). */
+    EXPECT_NEAR(DUEL_MENU_DIST, 0.5f, 1e-6f);
+    EXPECT_NEAR(DUEL_MENU_SCALE, 0.42f, 1e-6f);
+    EXPECT_NEAR(DUEL_MENU_PANEL_W, 0.325f, 0.005f);
+    /* M18: the top handle strip is gone (sides-only grab). */
+    {
+        DuelMenu m;
+        float ph;
+        DuelMenu_Init(&m);
+        DuelMenu_SetState(&m, DUEL_APP_BRIEF);
+        ph = DuelMenu_PanelH(&m);
+        EXPECT(ph > 0.25f && ph < 0.29f); /* 8-row brief fits the view */
+    }
+    printf("home_anchor ok\n");
+}
+
+/* M12 ghost gate: parked-dead ships never fire the one-shot explosion;
+ * a seen-alive kill fires exactly once; rearm snapshots seen=alive. */
+static void test_fx_boom(void) {
+    int seen = 0, boom = 0;
+    /* Parked: dead from frame one, boom rearmed every frame -> silent. */
+    {
+        int f;
+        for (f = 0; f < 5; f++) {
+            boom = 0; /* rearm (full wanted wave) */
+            EXPECT(duel_fx_boom(&seen, 0, &boom) == 0);
+            EXPECT(seen == 0 && boom == 0);
+        }
+    }
+    /* Live then killed: exactly one firing frame. */
+    EXPECT(duel_fx_boom(&seen, 1, &boom) == 0);
+    EXPECT(seen == 1);
+    EXPECT(duel_fx_boom(&seen, 0, &boom) == 1);
+    EXPECT(boom == 1);
+    EXPECT(duel_fx_boom(&seen, 0, &boom) == 0);
+    EXPECT(duel_fx_boom(&seen, 0, &boom) == 0);
+    /* Wave reset: rearm (seen=alive, boom=0), revive, kill again. */
+    seen = 1; boom = 0;
+    EXPECT(duel_fx_boom(&seen, 1, &boom) == 0);
+    EXPECT(duel_fx_boom(&seen, 0, &boom) == 1);
+    EXPECT(duel_fx_boom(&seen, 0, &boom) == 0);
+    printf("fx_boom ok\n");
+}
+
+/* M19 series: best-of length (default 3), round/won counters, and the
+ * RESULT series line (refreshed on every screen change). */
+static void test_series(void) {
+    DuelMenu m;
+    DuelMenuRow rows[DUEL_MENU_MAXROWS];
+    int n;
+    DuelMenu_Init(&m);
+    EXPECT(m.series_best == 3);
+    EXPECT(m.series_round == 0 && m.series_won == 0);
+    /* BRIEF carries the RONDAS choice at row 5. */
+    DuelMenu_SetState(&m, DUEL_APP_BRIEF);
+    n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+    EXPECT(n == 8);
+    EXPECT(rows[5].kind == DUEL_ROW_CHOICE);
+    EXPECT(!strcmp(rows[5].label, "RONDAS"));
+    /* RESULT carries the series line under the pilot line. */
+    m.series_round = 2;
+    m.series_won = 1;
+    m.result_win = 1;
+    DuelMenu_SetState(&m, DUEL_APP_RESULT);
+    n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+    EXPECT(n == 4);
+    EXPECT(rows[1].kind == DUEL_ROW_LABEL);
+    EXPECT(!strcmp(m.series_line, "RONDA 2 DE 3 GANADAS: 1"));
+    EXPECT(!strcmp(rows[1].label, m.series_line));
+    printf("series ok\n");
+}
+
+/* M15 panel grab: pinch-latch near the panel. Latch needs shut+near;
+ * release on open/inactive; position never releases (free drag). */
+static void test_panel_grab(void) {
+    DuelPanelGrab g;
+    DuelPanelGrab_Reset(&g);
+    EXPECT(g.held == 0);
+    /* Open pinch near the panel: no latch. */
+    DuelPanelGrab_Update(&g, 1, 1, 0.10f);
+    EXPECT(g.held == 0);
+    /* Shut pinch far from the panel: no latch. */
+    DuelPanelGrab_Update(&g, 1, 0, DUEL_PANEL_PINCH_SHUT);
+    EXPECT(g.held == 0);
+    /* Shut + near: latch. */
+    DuelPanelGrab_Update(&g, 1, 1, DUEL_PANEL_PINCH_SHUT);
+    EXPECT(g.held == 1);
+    /* Dragged away from the panel: still held (free drag). */
+    DuelPanelGrab_Update(&g, 1, 0, DUEL_PANEL_PINCH_SHUT);
+    EXPECT(g.held == 1);
+    /* Mid-band: held (hysteresis). */
+    DuelPanelGrab_Update(&g, 1, 0,
+        (DUEL_PANEL_PINCH_SHUT + DUEL_PANEL_PINCH_OPEN) * 0.5f);
+    EXPECT(g.held == 1);
+    /* Opened: release. */
+    DuelPanelGrab_Update(&g, 1, 1, DUEL_PANEL_PINCH_OPEN);
+    EXPECT(g.held == 0);
+    /* Relatch, then tracking lost: release. */
+    DuelPanelGrab_Update(&g, 1, 1, DUEL_PANEL_PINCH_SHUT);
+    EXPECT(g.held == 1);
+    DuelPanelGrab_Update(&g, 0, 1, DUEL_PANEL_PINCH_SHUT);
+    EXPECT(g.held == 0);
+    printf("panel_grab ok\n");
+}
+
+/* M15 panel drag math: game<->LOCAL orientation pair roundtrips,
+ * and the reach clamp keeps the panel between MIN_D and MAX_D of the
+ * neutral. (M17 removed the delta undrag: the tablet follow places
+ * absolute; see test_panel_follow.) */
+static void test_panel_drag(void) {
+    DuelQuat ship = duel_q_axis_angle(duel_v3(0, 1, 0), 0.7f);
+    DuelQuat mo = duel_q_axis_angle(duel_v3(1, 0, 0), 0.05f);
+    float yaw = -0.4f;
+    DuelQuat lq = duel_q_axis_angle(duel_v3(0, 1, 0), 1.1f), gq, rq;
+    DuelVec3 neutral = duel_v3(1.0f, 2.0f, 3.0f), c;
+    /* Orientation pair roundtrips (q ~ -q: compare |dot|). */
+    gq = duel_q_norm(duel_q_mul(ship, duel_q_mul(mo, duel_q_mul(
+        duel_q_axis_angle(duel_v3(0, 1, 0), -yaw), lq))));
+    rq = duel_panel_unrot(ship, mo, yaw, gq);
+    EXPECT(fabsf(rq.x * lq.x + rq.y * lq.y + rq.z * lq.z + rq.w * lq.w) >
+        1.0f - 1e-5f);
+    /* Clamp: inside untouched, outside pulled to the shell. */
+    c = duel_panel_clamp(neutral, duel_v3_add(neutral, duel_v3(0, 0, -0.5f)));
+    EXPECT_NEAR(c.x, neutral.x, 1e-6f);
+    EXPECT_NEAR(c.z, neutral.z - 0.5f, 1e-6f);
+    c = duel_panel_clamp(neutral, duel_v3_add(neutral, duel_v3(0, 0, -2.0f)));
+    EXPECT_NEAR(duel_v3_len(duel_v3_sub(c, neutral)), DUEL_PANEL_MAX_D, 1e-5f);
+    c = duel_panel_clamp(neutral, duel_v3_add(neutral, duel_v3(0, 0, -0.1f)));
+    EXPECT_NEAR(duel_v3_len(duel_v3_sub(c, neutral)), DUEL_PANEL_MIN_D, 1e-5f);
+    c = duel_panel_clamp(neutral, neutral);
+    EXPECT_NEAR(duel_v3_len(duel_v3_sub(c, neutral)), DUEL_PANEL_MIN_D, 1e-5f);
+    printf("panel_drag ok\n");
+}
+
+/* M17 tablet follow: the latch zone is the SIDES only (M18: no top /
+ * bottom / corners, row interior stays tap-only); the absolute
+ * game->LOCAL place roundtrips the forward path; the hand quat pairs
+ * with unrot. */
+static void test_panel_follow(void) {
+    float pw = DUEL_MENU_PANEL_W, ph = 0.4f;
+    /* Side middles latch (either side, slightly inside or out)... */
+    EXPECT(duel_panel_frame(pw, ph, -pw * 0.5f + 0.01f, 0.0f, 0.03f));
+    EXPECT(duel_panel_frame(pw, ph, pw * 0.5f - 0.01f, 0.05f, 0.03f));
+    EXPECT(duel_panel_frame(pw, ph, -pw * 0.5f - 0.02f, -0.05f, 0.03f));
+    /* ...corners, top, bottom, interior, air and off-plane do not. */
+    EXPECT(!duel_panel_frame(pw, ph, pw * 0.5f - 0.01f, ph * 0.5f - 0.01f, 0.03f));
+    EXPECT(!duel_panel_frame(pw, ph, -pw * 0.5f + 0.01f, -ph * 0.5f + 0.01f, 0.03f));
+    EXPECT(!duel_panel_frame(pw, ph, 0.0f, ph * 0.5f + 0.01f, 0.03f));
+    EXPECT(!duel_panel_frame(pw, ph, 0.0f, -ph * 0.5f + 0.01f, 0.03f));
+    EXPECT(!duel_panel_frame(pw, ph, 0.0f, 0.0f, 0.03f));
+    EXPECT(!duel_panel_frame(pw, ph, 0.0f, -ph * 0.5f - 0.10f, 0.03f));
+    EXPECT(!duel_panel_frame(pw, ph, 0.0f, 0.0f, 0.20f));
+    EXPECT(!duel_panel_frame(pw, ph, 0.0f, 0.0f, -0.15f));
+    /* Absolute place roundtrips neutralize + eye path. */
+    {
+        DuelSeatCal cal;
+        DuelQuat ship = duel_q_axis_angle(duel_v3(0, 1, 0), 0.7f);
+        DuelVec3 ship_t = duel_v3(10.0f, -3.0f, 40.0f);
+        DuelVec3 seat = duel_v3(0.0f, 0.75f, -0.78f);
+        DuelVec3 mo_p = duel_v3(0.01f, -0.02f, 0.03f);
+        DuelQuat mo = duel_q_axis_angle(duel_v3(1, 0, 0), 0.05f);
+        DuelVec3 lp = duel_v3(1.2f, 1.9f, 2.7f), sp, back;
+        DuelQuat lq = duel_q_axis_angle(duel_v3(0, 1, 0), 1.1f), sq, gq;
+        DuelVec3 gp;
+        DuelQuat hl = duel_q_axis_angle(duel_v3(1, 0, 0), 0.9f);
+        DuelQuat hg, rq;
+        memset(&cal, 0, sizeof(cal));
+        duel_cal_capture(&cal, duel_v3(1.0f, 2.0f, 3.0f),
+                         duel_q_axis_angle(duel_v3(0, 1, 0), 0.3f),
+                         DUEL_CAL_INIT);
+        duel_cal_neutralize(&cal, lp, lq, &sp, &sq);
+        duel_eye_pose_motion(ship, ship_t, seat, mo_p, mo, sq, sp, &gq, &gp);
+        back = duel_panel_place(ship, ship_t, seat, mo_p, mo,
+                                cal.neutral_pos, cal.neutral_yaw, gp);
+        EXPECT_NEAR(back.x, lp.x, 1e-4f);
+        EXPECT_NEAR(back.y, lp.y, 1e-4f);
+        EXPECT_NEAR(back.z, lp.z, 1e-4f);
+        /* Hand quat pairs with unrot. */
+        hg = duel_panel_handq(ship, mo, cal.neutral_yaw, hl);
+        rq = duel_panel_unrot(ship, mo, cal.neutral_yaw, hg);
+        EXPECT(fabsf(rq.x * hl.x + rq.y * hl.y + rq.z * hl.z +
+                     rq.w * hl.w) > 1.0f - 1e-5f);
+    }
+    printf("panel_follow ok\n");
+}
+
+static void test_pausebtn(void) {
+    /* M24: the photo A button on the RIGHT console (Tex16 V quad).
+     * Right side, below the eye, within arm's reach of the seat. */
+    DuelVec3 seat = duel_v3(0.0f, 0.75f, -0.78f);
+    float d = duel_v3_len(duel_v3_sub(DUEL_PAUSEBTN_SHIP, seat));
+    EXPECT(DUEL_PAUSEBTN_SHIP.x > 0.20f);
+    EXPECT(DUEL_PAUSEBTN_SHIP.y < 0.75f);
+    EXPECT(DUEL_PAUSEBTN_SHIP.y > 0.30f);
+    EXPECT(d > 0.30f && d < 0.80f);
+    /* Mate C (0.3996, 0.4784, -1.1399): 4.6 cm away, outside PRESS. */
+    {
+        DuelVec3 mate = duel_v3(0.3996f, 0.4784f, -1.1399f);
+        float dm = duel_v3_len(duel_v3_sub(mate, DUEL_PAUSEBTN_SHIP));
+        EXPECT(dm > 0.04f && dm < 0.06f);
+        EXPECT(DUEL_PAUSEBTN_PRESS_R < dm);
+    }
+    printf("pausebtn ok\n");
+}
+
 int main(void) {
     test_quat();
     test_flight();
@@ -3047,6 +3579,18 @@ int main(void) {
     test_pilot_roundtrip();
     test_pilot_scan();
     test_difficulty();
+    test_menu_highlight();
+    test_easy_envelope();
+    test_series();
+    test_home_view();
+    test_touch_level();
+    test_skirmish();
+    test_home_anchor();
+    test_fx_boom();
+    test_panel_grab();
+    test_panel_drag();
+    test_panel_follow();
+    test_pausebtn();
     if (fails == 0) printf("ALL DUEL TESTS PASS\n");
     else printf("%d FAILURES\n", fails);
     return fails == 0 ? 0 : 1;

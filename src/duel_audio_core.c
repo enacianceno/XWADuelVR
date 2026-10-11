@@ -75,6 +75,26 @@ static void trigger_at(DuelAudioState *st, DuelAudioEvent ev, DuelVec3 at,
 
 void DuelAudio_PollEvents(DuelAudioState *st, const DuelState *s,
                           DuelListener lis, float dt) {
+    /* M10: first poll snapshots the transition trackers silently, so
+     * ships parked dead by the battle size never fake a death event.
+     * Loops/warning below still run (audible steady state). */
+    if (!st->synced) {
+        int k;
+        st->synced = 1;
+        st->last_muzzle_p = s->player.muzzle;
+        st->last_hp_p = s->player.hp;
+        st->last_alive_p = s->player.alive;
+        for (k = 0; k < DUEL_TIE_COUNT; k++) {
+            st->last_muzzle_t[k] = s->ties[k].muzzle;
+            st->last_hp_t[k] = s->ties[k].hp;
+            st->last_alive_t[k] = s->ties[k].alive;
+        }
+        for (k = 0; k < DUEL_ALLY_COUNT; k++) {
+            st->last_muzzle_a[k] = s->allies[k].muzzle;
+            st->last_hp_a[k] = s->allies[k].hp;
+            st->last_alive_a[k] = s->allies[k].alive;
+        }
+    }
     /* Fire: muzzle counter advanced (a reset wraps it to 0: resync, silent). */
     if (s->player.muzzle != st->last_muzzle_p) {
         if (s->player.muzzle > st->last_muzzle_p)

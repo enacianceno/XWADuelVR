@@ -88,7 +88,10 @@ typedef enum DuelGrabState {
 #define DUEL_GRAB_NEAR_R 0.20f   /* palm within: NEAR */
 #define DUEL_GRAB_FAR_R 0.24f    /* palm beyond: back to FAR (hysteresis) */
 #define DUEL_GRAB_GRAB_R 0.16f   /* pinch midpoint within: grabbable */
-#define DUEL_GRAB_LOSE_R 0.20f   /* pinch midpoint beyond: release */
+/* M20: release widened 0.20 -> 0.45 (user order: hard yanks with the
+ * grip shut must keep holding the levers). Latch stays deliberate;
+ * grip-open / tracking-loss release unchanged. */
+#define DUEL_GRAB_LOSE_R 0.45f   /* pinch midpoint beyond: release */
 /* M3.8c: stick latches positioned-only. Markers are gone, and the 16 cm
  * sphere latched air ~10 cm off the column ("no agarra"). Palm wrapped
  * on the column reads 3-6 cm; 9 cm keeps that, rejects air. */
@@ -145,6 +148,15 @@ float DuelHand_FistDist(const DuelHand *h);
 extern const DuelVec3 DUEL_LEVER_PIVOT_SHIP;  /* (0, 0.05, -1.27) */
 extern const DuelVec3 DUEL_LEVER_PIVOT_MODEL; /* (0, 0.05, +1.27) */
 extern const DuelVec3 DUEL_QUAD_SHIP; /* (-0.38, 0.46, -0.91) mid-slot */
+/* M19 pause button on a REAL cockpit button (barycentric audit).
+ * M24 target (user photo: the A-like button of the tilted right pair
+ * by the window): the Tex16 V-cell quad (shows as A/up-arrow) on
+ * mesh02p4, right console. Mate C 4.6 cm away, so only ONE pauses
+ * with room to spare (M23 mesh40p1 was the CENTER pair, a miss).
+ * Index-tip ship distance drives near/press. */
+extern const DuelVec3 DUEL_PAUSEBTN_SHIP; /* (+0.359, 0.471, -1.160) */
+#define DUEL_PAUSEBTN_PRESS_R 0.03f
+#define DUEL_PAUSEBTN_NEAR_R 0.06f
 
 int DuelLever_IsPrim(int mesh_idx, int prim_idx);
 /* Stick deflection from a pinch-midpoint (ship frame) vs rest grip:
@@ -212,6 +224,26 @@ int DuelFire_HoldOk(int grab_held, int active, int index_valid,
  * a standby HELD machine takes over seamlessly on release (handoff). */
 void DuelGrab_Assign(const DuelGrab g[2][2], const float dist[2][2],
                      int holder[2]);
+
+/* M10 touch menus: fingertip press level with hysteresis. dist = signed
+ * meters from the fingertip to the panel plane (+ in front). in_bounds =
+ * the fingertip projects inside the panel. Press at <= 2 cm (6 cm behind
+ * tolerated: fingers pass through the plane); release past 5 cm front
+ * or off-panel. */
+#define DUEL_TOUCH_PRESS_D 0.02f
+#define DUEL_TOUCH_BACK_D -0.06f
+#define DUEL_TOUCH_RELEASE_D 0.05f
+void DuelTouch_Level(int *pressed, float dist, int in_bounds);
+
+/* M15 panel grab: pinch-latch near the menu panel. Latch needs shut+near;
+ * release on open/inactive only (position never releases: free drag).
+ * Own hysteresis band (mirrors the HOTAS values; panel tuning must
+ * never move the stick/quadrant feel). */
+#define DUEL_PANEL_PINCH_SHUT 0.055f
+#define DUEL_PANEL_PINCH_OPEN 0.085f
+typedef struct DuelPanelGrab { int held; } DuelPanelGrab;
+void DuelPanelGrab_Reset(DuelPanelGrab *g);
+void DuelPanelGrab_Update(DuelPanelGrab *g, int active, int near, float pinch);
 
 /* M3.5 platform hand mesh (XR_FB_hand_tracking_mesh): the Quest bind
  * mesh skinned on CPU from the located EXT joints. Bind data is static

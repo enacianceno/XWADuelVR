@@ -67,26 +67,46 @@ typedef struct DuelMenu {
     int hover;                /* hand-ray row, -1 none (click target) */
     /* Live option values (main applies + persists via profile). */
     int difficulty;           /* DuelDifficulty */
+    int skirmish;             /* M10: battle size 1..5 ships per side */
     float vol_master, vol_music, vol_sfx; /* 0..1 */
     float sens;               /* 0.5..1.5, 1 = baseline */
     float dead;               /* 0.05..0.30, 0.15 = baseline */
     int result_win;           /* RESULT screen: 1 victory, 0 defeat */
     int result_kills;         /* player kills this combat */
+    /* M19 series: best-of length (1/3/5, default 3), current round
+     * (1-based, 0 = no series yet), rounds won, RESULT line. */
+    int series_best;
+    int series_round;
+    int series_won;
+    char series_line[40];
     /* Pilot context (main owns the files; menu formats the rows). */
     char pilot_names[DUEL_PILOT_MAX][DUEL_PILOT_NAME_MAX + 1];
     int npilots;
     int pilot_idx;            /* current pilot, -1 none */
     DuelPilot pilot;          /* loaded stats of pilot_names[pilot_idx] */
-    char dyn[4][40];          /* dynamic label lines (RefreshPilots) */
+    /* Dynamic label lines: [0..1] pilots screen, [2] brief pilot,
+     * [3] result pilot, [4] brief enemy line, [5] brief ally line. */
+    char dyn[6][40];
     char rlab[DUEL_PILOT_MAX][DUEL_PILOT_NAME_MAX + 4]; /* pilot rows */
 } DuelMenu;
 
-/* Panel geometry (meters, panel-local: x right, y up, origin center). */
-#define DUEL_MENU_PANEL_W 1.70f
-#define DUEL_MENU_ROW_H 0.105f
-#define DUEL_MENU_ROW_GAP 0.030f
-#define DUEL_MENU_TITLE_H 0.13f
-#define DUEL_MENU_PAD 0.09f
+/* Panel geometry (meters, panel-local: x right, y up, origin center).
+ * M11: near touch panel 0.5 m from the eyes, cockpit-fixed (same frame
+ * as the ship: centered where the ship is, never runs away). Geometry
+ * keeps the 1.1 m design's angular size (x0.4545), so text/rows read
+ * identically up close.
+ * M16: the whole panel is 30% smaller (user order): one scale knob
+ * over the M11 design values. DIST stays 0.5 m.
+ * M19: 40% smaller still (x0.6 of M16, user order). */
+#define DUEL_MENU_SCALE 0.42f
+#define DUEL_MENU_DIST 0.5f
+#define DUEL_MENU_PANEL_W (0.773f * DUEL_MENU_SCALE)
+#define DUEL_MENU_ROW_H (0.0477f * DUEL_MENU_SCALE)
+#define DUEL_MENU_ROW_GAP (0.0136f * DUEL_MENU_SCALE)
+#define DUEL_MENU_TITLE_H (0.0591f * DUEL_MENU_SCALE)
+#define DUEL_MENU_PAD (0.0409f * DUEL_MENU_SCALE)
+/* M18: the M16 top handle strip is gone (user order: grab from the
+ * sides only). Grip ticks ride on the side borders (render-side). */
 
 void DuelMenu_Init(DuelMenu *m);
 void DuelMenu_SetState(DuelMenu *m, DuelAppState s);
@@ -105,6 +125,10 @@ int DuelMenu_RowRect(const DuelMenu *m, int row,
 int DuelMenu_HitRow(const DuelMenu *m, float x, float y);
 /* Controller nav: move selection (+1/-1), skipping labels. */
 void DuelMenu_Nav(DuelMenu *m, int dir);
+/* Visible highlight: the hand-hovered row when pointing, else the
+ * controller-selected row. Controllers AND hands activate this row so
+ * the highlight always matches the action (M9 selection fix). */
+int DuelMenu_Highlighted(const DuelMenu *m);
 /* Activate the controller-selected row. */
 DuelMenuAction DuelMenu_Activate(DuelMenu *m);
 /* Activate an explicit (hand-hovered) row. */

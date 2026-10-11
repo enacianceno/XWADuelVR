@@ -8,6 +8,7 @@ const DuelVec3 DUEL_LEVER_SHIP = { 0.0f, 0.47f, -1.21f };
 const DuelVec3 DUEL_LEVER_PIVOT_SHIP = { 0.0f, 0.05f, -1.27f };
 const DuelVec3 DUEL_LEVER_PIVOT_MODEL = { 0.0f, 0.05f, 1.27f };
 const DuelVec3 DUEL_QUAD_SHIP = { -0.38f, 0.46f, -0.91f };
+const DuelVec3 DUEL_PAUSEBTN_SHIP = { 0.3590f, 0.4713f, -1.1595f };
 
 /* Bone segments over XR_HAND_JOINT_*_EXT indices (PALM=0 WRIST=1
  * THUMB=2..5 INDEX=6..10 MIDDLE=11..15 RING=16..20 LITTLE=21..25). */
@@ -636,5 +637,33 @@ void DuelGrab_Assign(const DuelGrab g[2][2], const float dist[2][2],
             if (win < 0 || dist[h][t] < dist[win][t]) win = h;
         }
         holder[t] = win;
+    }
+}
+
+/* M10 touch menus: press level with hysteresis (pure, tested). */
+void DuelTouch_Level(int *pressed, float dist, int in_bounds) {
+    int p;
+    if (!pressed) return;
+    p = *pressed ? 1 : 0;
+    if (!in_bounds || dist > DUEL_TOUCH_RELEASE_D) p = 0;
+    else if (dist <= DUEL_TOUCH_PRESS_D && dist >= DUEL_TOUCH_BACK_D) p = 1;
+    *pressed = p;
+}
+
+void DuelPanelGrab_Reset(DuelPanelGrab *g) {
+    g->held = 0;
+}
+
+void DuelPanelGrab_Update(DuelPanelGrab *g, int active, int near, float pinch) {
+    if (!active) {
+        /* Tracking lost (or cal invalid / other hand holds): drop now,
+         * like the HOTAS machines, never stick on stale data. */
+        g->held = 0;
+        return;
+    }
+    if (g->held) {
+        if (pinch >= DUEL_PANEL_PINCH_OPEN) g->held = 0;
+    } else if (near && pinch <= DUEL_PANEL_PINCH_SHUT) {
+        g->held = 1;
     }
 }

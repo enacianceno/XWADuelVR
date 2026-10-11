@@ -87,8 +87,9 @@
  * clear (panel front edge is behind-above the eye).
  * M2.2c: user-ordered POV +20 cm forward (was z -0.78). Eye model z is
  * now 0.98, 2 cm inside the windshield bound -- tight but passing. */
-const DuelVec3 DUEL_SEAT_POS = { 0.0f, 0.75f, -0.88f }; /* M3.0b: POV 10cm back
- * (+Z ship) + 5cm up (+Y) per user order (was 0.70/-0.98 M2.2c). */
+/* M4g: user-ordered POV 10 cm back (+Z ship; was -0.88 M3.0b).
+ * Eye model (0,0.75,+0.78): 5 cm ahead of the seat-back front (0.73). */
+const DuelVec3 DUEL_SEAT_POS = { 0.0f, 0.75f, -0.78f };
 
 /* P0.2 diagnostics (build-time). M1 oracle proved submit works; it must not
  * stay in the visual scene. Cockpit diag colors identify which mesh is
@@ -164,6 +165,10 @@ struct DuelRender {
      * hands that must hide behind the dashboard). */
     SDL_GPUGraphicsPipeline *pipe_tri_test; /* M3.3: solid depth-tested tris
      * (throttle quadrant handle: occludes + occluded, writes depth). */
+    SDL_GPUGraphicsPipeline *pipe_menu_tri; /* M14: menu bg/rows (alpha,
+     * depth-tested + writes: fingers in front win, hands behind hide). */
+    SDL_GPUGraphicsPipeline *pipe_menu_line; /* M14: menu glyphs (alpha
+     * lines, depth-tested, write off like the hand bones). */
     SDL_GPUGraphicsPipeline *pipe_cube;
     SDL_GPUGraphicsPipeline *pipe_sprite; /* P1.5: lit shaders, ADD blend */
     SDL_GPUBuffer *spr_vbo; /* billboard quads, lit layout, rebuilt per eye */
@@ -210,11 +215,26 @@ struct DuelRender {
     DuelVec3 menu_center; /* LOCAL anchor (see SetMenuPanel) */
     DuelQuat menu_quat; /* LOCAL; duel_q_forward points INTO the screen */
     const DuelMenu *menu; /* main-owned, valid for the run */
-    int menu_hover;     /* hand-ray row (-1 none), eye 0+1 agree */
-    float menu_hx, menu_hy; /* hover point, panel-local */
-    int menu_pinch[2];  /* per-side pinch level (hysteresis) */
-    DuelVec3 menu_ray_o[2], menu_ray_e[2]; /* ray visuals */
-    int menu_ray_on[2];
+    int menu_hover;     /* touch row (-1 none), eye 0+1 agree */
+    float menu_hx, menu_hy; /* touch point, panel-local */
+    int menu_press[2];  /* per-side fingertip press level (hysteresis) */
+    int menu_touch;     /* M11: winner hand pressed (click level) */
+    /* M15 movable panel: per-side pinch grab, drop quiet (no click
+     * until the finger lifts), moved latch. M17 tablet latch: hand
+     * game quat + pinch->center + panel game quat at latch; rot_ok
+     * gates the rigid follow on wrist tracking. */
+    DuelPanelGrab menu_pg[2];
+    DuelQuat menu_pghand[2];
+    DuelVec3 menu_pgrel[2];
+    DuelQuat menu_pgpq[2];
+    int menu_pgrot[2];
+    int menu_pgquiet[2];
+    int menu_moved;
+    /* M19 pause button: press edge (consumed by main), level memory
+     * (survives ClearGrabs: no re-pause with the finger still down),
+     * near flag for the highlight. */
+    int pausebtn_edge, pausebtn_prev, pausebtn_near;
+    /* M4e: finger-ray visuals removed (touch UI needs no aim aid). */
     /* M3.4: right-hand trigger state (index extension while HELD).
      * M3.7: one fire machine per hand (either thumb fires the stick). */
     DuelFire fire_r, fire_l;
@@ -261,6 +281,7 @@ struct DuelRender {
     DuelParticle parts[MAX_PARTICLES];
     float last_hp_player, last_hp_tie[DUEL_TIE_COUNT], last_hp_ally[DUEL_ALLY_COUNT];
     int boom_player, boom_tie[DUEL_TIE_COUNT], boom_ally[DUEL_ALLY_COUNT]; /* explosion spawned */
+    int seen_player, seen_tie[DUEL_TIE_COUNT], seen_ally[DUEL_ALLY_COUNT]; /* M12: seen alive (ghost gate) */
     float flash;
     float shake;        /* impact camera shake 0..1 (decays in Update) */
     unsigned shake_seed;
@@ -755,6 +776,12 @@ static int load_model(DuelRender *r, DuelModel *m, const char *subdir) {
     return m->vbo && m->ibo;
 }
 
+static void draw_model(DuelRender *r, SDL_GPUCopyPass *pass,
+                       SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *rp,
+                       const DuelModel *m, const float *vp,
+                       const float *model_m, int diag, int skip_blend,
+                       const float *lever_m);
+
 /* ---------------- M1 known-good cube (R0 oracle) ----------------
  * Verbatim port of XWAQuest M1 (app/src/main/cpp/main.c): same math, same
  * winding, same shader bytecode (shaders/m1_cube_*.spv, SDL zlib license).
@@ -960,6 +987,13 @@ DuelRender *DuelRender_Create(SDL_GPUDevice *device, SDL_GPUTextureFormat swap_f
 #endif
     r->pipe_tri_alpha = make_pipeline(r, r->unlit_vs, r->unlit_fs, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
                                       0, 0, 0, 1, 0, swap_fmt, 0);
+    /* M14: the menu used pipe_tri_alpha/pipe_lines (depth off, always on
+     * top), so it overdrew the fingers even while touching. Own pipes,
+     * depth-tested, drawn before the hands (bg ~opaque, writes depth). */
+    r->pipe_menu_tri = make_pipeline(r, r->unlit_vs, r->unlit_fs, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+                                      1, 1, 0, 1, 0, swap_fmt, 0);
+    r->pipe_menu_line = make_pipeline(r, r->unlit_vs, r->unlit_fs, SDL_GPU_PRIMITIVETYPE_LINELIST,
+                                      1, 0, 0, 1, 1, swap_fmt, 0);
     r->pipe_cube = make_pipeline(r, r->cube_vs, r->cube_fs, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
                                  1, 1, 0, 0, 0, swap_fmt, 2);
     SDL_GPUSamplerCreateInfo si;
@@ -1126,7 +1160,8 @@ DuelRender *DuelRender_Create(SDL_GPUDevice *device, SDL_GPUTextureFormat swap_f
 int DuelRender_Ready(const DuelRender *r) {
     /* sprite textures are NOT required: the cook lands separately. */
     return r && r->pipe_lit && r->pipe_planet && r->pipe_tri_add && r->pipe_lines &&
-        r->pipe_tri_alpha && r->pipe_cube && r->pipe_sprite && r->tie.vbo && r->cockpit.vbo &&
+        r->pipe_tri_alpha && r->pipe_menu_tri && r->pipe_menu_line &&
+        r->pipe_cube && r->pipe_sprite && r->tie.vbo && r->cockpit.vbo &&
         r->dyn_vbo && r->spr_vbo && r->cube_vbo && r->dyn_tbuf && r->spr_tbuf
 #if DUEL_VIRTUAL_HANDS
         && r->pipe_lines_test && r->pipe_tri_test
@@ -1185,6 +1220,8 @@ void DuelRender_Destroy(DuelRender *r) {
     if (r->pipe_lines_test) SDL_ReleaseGPUGraphicsPipeline(r->device, r->pipe_lines_test);
     if (r->pipe_tri_test) SDL_ReleaseGPUGraphicsPipeline(r->device, r->pipe_tri_test);
     SDL_ReleaseGPUGraphicsPipeline(r->device, r->pipe_tri_alpha);
+    SDL_ReleaseGPUGraphicsPipeline(r->device, r->pipe_menu_tri);
+    SDL_ReleaseGPUGraphicsPipeline(r->device, r->pipe_menu_line);
     SDL_ReleaseGPUGraphicsPipeline(r->device, r->pipe_cube);
     SDL_ReleaseGPUShader(r->device, r->cube_vs);
     SDL_ReleaseGPUShader(r->device, r->cube_fs);
@@ -1315,8 +1352,9 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
         for (k = 0; k < DUEL_TIE_COUNT; k++) r->last_hp_tie[k] = s->ties[k].hp;
         for (k = 0; k < DUEL_ALLY_COUNT; k++) r->last_hp_ally[k] = s->allies[k].hp;
     }
-    if (!s->player.alive && !r->boom_player) {
-        r->boom_player = 1;
+    /* M12: one staged explosion per kill, gated on seen-alive (parked
+     * ships never fire: no ghost explosions, no stuck flash). */
+    if (duel_fx_boom(&r->seen_player, s->player.alive, &r->boom_player)) {
         /* staged: white flash + orange fireball + dark embers */
         spawn_burst(r, s->player.pos, 60.0f, 140.0f, 20, 0.25f, 1.0f, 1.0f, 0.95f);
         spawn_burst(r, s->player.pos, 20.0f, 90.0f, 60, 1.2f, 1.0f, 0.55f, 0.15f);
@@ -1329,8 +1367,8 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
          * reset rearms every flag (see below). */
         int k;
         for (k = 0; k < DUEL_TIE_COUNT; k++) {
-            if (!s->ties[k].alive && !r->boom_tie[k]) {
-                r->boom_tie[k] = 1;
+            if (duel_fx_boom(&r->seen_tie[k], s->ties[k].alive,
+                             &r->boom_tie[k])) {
                 spawn_burst(r, s->ties[k].pos, 60.0f, 140.0f, 20, 0.25f, 1.0f, 1.0f, 0.95f);
                 spawn_burst(r, s->ties[k].pos, 20.0f, 90.0f, 60, 1.2f, 1.0f, 0.55f, 0.15f);
                 spawn_burst(r, s->ties[k].pos, 5.0f, 30.0f, 40, 2.6f, 0.7f, 0.2f, 0.05f);
@@ -1340,8 +1378,8 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
             }
         }
         for (k = 0; k < DUEL_ALLY_COUNT; k++) {
-            if (!s->allies[k].alive && !r->boom_ally[k]) {
-                r->boom_ally[k] = 1;
+            if (duel_fx_boom(&r->seen_ally[k], s->allies[k].alive,
+                             &r->boom_ally[k])) {
                 spawn_burst(r, s->allies[k].pos, 60.0f, 140.0f, 20, 0.25f, 1.0f, 1.0f, 0.95f);
                 spawn_burst(r, s->allies[k].pos, 20.0f, 90.0f, 60, 1.2f, 1.0f, 0.55f, 0.15f);
                 spawn_burst(r, s->allies[k].pos, 5.0f, 30.0f, 40, 2.6f, 0.7f, 0.2f, 0.05f);
@@ -1354,14 +1392,23 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
     duel_sprite_update(r->sprites, DUEL_SPR_SLOTS, dt);
     /* M5: rearm ONLY on a fresh wave (everyone alive: exactly the
      * post-reset state). Rearming on partial survival would re-fire
-     * the dead ships' explosions every frame mid-wave. */
+     * the dead ships' explosions every frame mid-wave.
+     * M10: compare against the WANTED counts (extras spawn dead). */
     if (s->phase == DUEL_PHASE_COMBAT && s->player.alive &&
-            Duel_TiesAlive(s) == DUEL_TIE_COUNT &&
-            Duel_AlliesAlive(s) == DUEL_ALLY_COUNT) {
+            Duel_TiesAlive(s) == Duel_TiesWanted(s) &&
+            Duel_AlliesAlive(s) == Duel_AlliesWanted(s)) {
         int k;
+        /* M12: rearm snapshots seen=alive (parked ships stay unseen). */
         r->boom_player = 0;
-        for (k = 0; k < DUEL_TIE_COUNT; k++) r->boom_tie[k] = 0;
-        for (k = 0; k < DUEL_ALLY_COUNT; k++) r->boom_ally[k] = 0;
+        r->seen_player = 1;
+        for (k = 0; k < DUEL_TIE_COUNT; k++) {
+            r->boom_tie[k] = 0;
+            r->seen_tie[k] = s->ties[k].alive ? 1 : 0;
+        }
+        for (k = 0; k < DUEL_ALLY_COUNT; k++) {
+            r->boom_ally[k] = 0;
+            r->seen_ally[k] = s->allies[k].alive ? 1 : 0;
+        }
     }
     if (r->flash > 0.0f) r->flash -= dt * 1.6f;
     if (r->flash < 0.0f) r->flash = 0.0f;
@@ -1638,6 +1685,37 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
             }
         }
     }
+    /* M19 pause button (right console): index-tip ship distance per
+     * hand (seat + neutralized LOCAL, like the grab palm). Combat only
+     * (!menu_show); edge on make, consumed by main. Level memory
+     * freezes with the menu up (resume with the finger down re-arms,
+     * never re-fires). */
+    {
+        int pressed = 0, near = 0, side;
+        if (!r->menu_show) {
+            for (side = 0; side < 2; side++) {
+                const DuelHand *h = DuelHands_Get(side);
+                if (r->hands_mask && r->cal.valid && h->active &&
+                        h->j[10].pos_valid) {
+                    DuelVec3 tip, tp;
+                    DuelQuat tq;
+                    float d;
+                    duel_cal_neutralize(&r->cal, h->j[10].pos, h->j[10].quat,
+                                        &tp, &tq);
+                    tip = duel_v3_add(DUEL_SEAT_POS, tp);
+                    d = duel_v3_len(duel_v3_sub(tip, DUEL_PAUSEBTN_SHIP));
+                    if (d < DUEL_PAUSEBTN_NEAR_R) near = 1;
+                    if (d < DUEL_PAUSEBTN_PRESS_R) pressed = 1;
+                }
+            }
+        }
+        if (pressed && !r->pausebtn_prev) {
+            r->pausebtn_edge = 1;
+            SDL_Log("DUEL pause button pressed");
+        }
+        if (!r->menu_show) r->pausebtn_prev = pressed;
+        r->pausebtn_near = near;
+    }
     /* M3.0a: active transitions log immediately (event, not spam): proves
      * the exact moment the runtime starts/stops seeing each hand. */
     {
@@ -1784,6 +1862,17 @@ void DuelRender_Calibrate(DuelRender *r, const DuelState *s,
     }
     if (!have_views) return;
     if (r->cal.valid && !reset_edge) return; /* steady state: never re-capture */
+    /* M10 home view: a death reset restores the first reference (boot or
+     * latest explicit recenter) instead of capturing the death head pose,
+     * so view + ship return to the start point. */
+    if (reset_edge && r->cal.home_valid) {
+        duel_cal_home_restore(&r->cal);
+        r->cal_space = 0;
+        SDL_Log("DUEL_CAL gen=%d reason=HOME-RESTORE seat=(%.2f,%.2f,%.2f)",
+                r->cal.generation,
+                DUEL_SEAT_POS.x, DUEL_SEAT_POS.y, DUEL_SEAT_POS.z);
+        return;
+    }
     if (!r->cal.valid) {
         if (++r->cal_settle < DUEL_CAL_SETTLE_FRAMES) return;
     }
@@ -1796,6 +1885,22 @@ void DuelRender_Calibrate(DuelRender *r, const DuelState *s,
                          vl->orientation.z, vl->orientation.w);
     int reason = reset_edge ? DUEL_CAL_RESET : (r->cal_space ? DUEL_CAL_RECENTER : DUEL_CAL_INIT);
     duel_cal_capture(&r->cal, mid, lq, reason);
+    /* M10: INIT/RECENTER captures (re)define home; a RESET capture only
+     * when no home exists yet (death before the first capture). */
+    if (reason != DUEL_CAL_RESET || !r->cal.home_valid)
+        duel_cal_home_store(&r->cal);
+    /* M15: a recenter invalidates any dragged spot (new neutral): drop
+     * the grab, forget the move, re-home the visible panel (the cal just
+     * validated, so PlaceMenuHome takes the home branch). */
+    if (reason == DUEL_CAL_RECENTER) {
+        DuelPanelGrab_Reset(&r->menu_pg[0]);
+        DuelPanelGrab_Reset(&r->menu_pg[1]);
+        r->menu_pgquiet[0] = r->menu_pgquiet[1] = 0;
+        r->menu_moved = 0;
+        if (r->menu_show && r->menu)
+            DuelRender_PlaceMenuHome(r, r->menu, duel_v3(0, 0, 0),
+                                     duel_q_identity());
+    }
     /* P0.5 §8 discriminator proof: neutralize the capture pose itself --
      * corrected MUST read ~0 (CASE A if not: neutralization broken; CASE B
      * if 0 but the seat still wrong: anchor broken). Camera world proves
@@ -1912,7 +2017,16 @@ void DuelRender_SetMenuPanel(DuelRender *r, int show, const DuelMenu *m,
     r->menu = m;
     r->menu_center = center;
     r->menu_quat = quat;
-    if (!show) { r->menu_hover = -1; r->menu_pinch[0] = r->menu_pinch[1] = 0; }
+    /* M15: a (re)place drops any grab (the cursor would be stale on the
+     * next screen); a still-pinched hand re-latches cleanly below. */
+    DuelPanelGrab_Reset(&r->menu_pg[0]);
+    DuelPanelGrab_Reset(&r->menu_pg[1]);
+    r->menu_pgquiet[0] = r->menu_pgquiet[1] = 0;
+    if (!show) {
+        r->menu_hover = -1;
+        r->menu_press[0] = r->menu_press[1] = 0;
+        r->menu_touch = 0;
+    }
 }
 
 /* M7: hide the combat HUD (cue/diamond/lead/bars) behind menu screens.
@@ -1938,6 +2052,9 @@ void DuelRender_ClearGrabs(DuelRender *r) {
     r->defl_pd = r->defl_rd = r->defl_ld = 0.0f;
     DuelFire_Reset(&r->fire_l);
     DuelFire_Reset(&r->fire_r);
+    /* M19: drop a stale button edge; the level memory survives (a finger
+     * still down after resume must release + repress, never re-fire). */
+    r->pausebtn_edge = 0;
 }
 
 /* M7 options RECENTRAR: same path as a Meta recenter (ship/cockpit
@@ -1950,15 +2067,25 @@ void DuelRender_RequestRecenter(DuelRender *r) {
     r->cal_settle = DUEL_CAL_SETTLE_FRAMES - DUEL_CAL_SPACE_SETTLE;
 }
 
-/* M7: hand-ray hover row + panel-local point + any-pinch level.
+/* M7: touch hover row + panel-local point + winner-press level.
  * Computed during the eye pass (previous frame's data: same 1-frame
- * lag as the hand-lever publish). */
+ * lag as the hand-lever publish). M10: direct panel touch (no pinch).
+ * M11: hover AND press come from the SAME winner hand. */
 int DuelRender_MenuPointer(const DuelRender *r, int *row, float *x, float *y) {
     if (!r || !r->menu_show || !r->menu) return 0;
     if (row) *row = r->menu_hover;
     if (x) *x = r->menu_hx;
     if (y) *y = r->menu_hy;
-    return (r->menu_pinch[0] || r->menu_pinch[1]) ? 1 : 0;
+    return r->menu_touch;
+}
+
+/* M19: pause-button press edge (1 once per press, consumed on read). */
+int DuelRender_PauseButton(DuelRender *r) {
+    int e;
+    if (!r) return 0;
+    e = r->pausebtn_edge;
+    r->pausebtn_edge = 0;
+    return e;
 }
 
 /* M3.4: 1 while a thumb trigger is pulled, else 0 (M3.7: either). */
@@ -2033,6 +2160,39 @@ static Uint32 skin_hands(DuelRender *r, const DuelState *s) {
 }
 #endif
 
+/* M11: canonical near-panel placement. Calibrated: 0.5 m in front of
+ * the calibrated eye point, facing it (cockpit-fixed: the same frame as
+ * the ship, so reselects land in the same spot and the panel never runs
+ * away). Pre-cal: the live head pose (the M9 gen 0->N re-place fixes it
+ * when the cal lands). */
+void DuelRender_PlaceMenuHome(DuelRender *r, const DuelMenu *m,
+                              DuelVec3 hpos, DuelQuat hquat) {
+    if (!r) return;
+    /* M15: the user placed the panel; every screen inherits the spot
+     * (still cockpit-fixed, just offset) until RECENTRAR re-homes. */
+    if (r->menu_moved) {
+        DuelRender_SetMenuPanel(r, 1, m, r->menu_center, r->menu_quat);
+        SDL_Log("DUEL menu kept dragged");
+        return;
+    }
+    if (r->cal.valid) {
+        DuelVec3 c;
+        DuelQuat q;
+        duel_home_anchor(&r->cal, duel_v3(0, 0, -DUEL_MENU_DIST), &c, &q);
+        DuelRender_SetMenuPanel(r, 1, m, c, q);
+        /* M12: placement branch on one line (far-panel diagnosis). */
+        SDL_Log("DUEL menu placed home dist=%.2f", DUEL_MENU_DIST);
+    } else {
+        DuelQuat pq =
+            duel_q_axis_angle(duel_v3(0, 1, 0), duel_yaw_of(hquat));
+        DuelVec3 pc = duel_v3_add(hpos, duel_v3_scale(duel_q_forward(pq),
+                                                     DUEL_MENU_DIST));
+        pc.y = hpos.y;
+        DuelRender_SetMenuPanel(r, 1, m, pc, pq);
+        SDL_Log("DUEL menu placed head dist=%.2f", DUEL_MENU_DIST);
+    }
+}
+
 /* M7 menu text: stroke glyphs as world-space line pairs on the panel
  * plane. align: 0 left (x = left edge), 1 center, 2 right (x = edge).
  * size = meters per font unit; y = text BASELINE in panel-local. */
@@ -2097,6 +2257,21 @@ static void duel_menu_quad(DynWriter *dw, DuelVec3 c, DuelVec3 px, DuelVec3 py,
     dyn_vert(d + 0, p0, cr, cg, cb, ca); dyn_vert(d + 9, p1, cr, cg, cb, ca);
     dyn_vert(d + 18, p2, cr, cg, cb, ca); dyn_vert(d + 27, p0, cr, cg, cb, ca);
     dyn_vert(d + 36, p2, cr, cg, cb, ca); dyn_vert(d + 45, p3, cr, cg, cb, ca);
+}
+
+/* Line segment on the panel plane (2 verts) into a line range. */
+static void duel_menu_seg(DynWriter *dw, DuelVec3 c, DuelVec3 px, DuelVec3 py,
+                          float x0, float y0, float x1, float y1,
+                          float cr, float cg, float cb) {
+    float *v = dyn_reserve(dw, 2);
+    DuelVec3 a, b;
+    if (!v) return;
+    a = duel_v3_add(c, duel_v3_add(duel_v3_scale(px, x0),
+                                  duel_v3_scale(py, y0)));
+    b = duel_v3_add(c, duel_v3_add(duel_v3_scale(px, x1),
+                                  duel_v3_scale(py, y1)));
+    dyn_vert(v, a, cr, cg, cb, 1.0f);
+    dyn_vert(v + 9, b, cr, cg, cb, 1.0f);
 }
 
 void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
@@ -2191,6 +2366,7 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         line_range = { 0, 0 }, hud_range = { 0, 0 }, flash_range = { 0, 0 },
         near_range = { 0, 0 }, mid_range = { 0, 0 }, hand_range = { 0, 0 },
         hbone_range = { 0, 0 }, quad_range = { 0, 0 },
+        btn_line_range = { 0, 0 },
         menu_tri_range = { 0, 0 }, menu_line_range = { 0, 0 };
     laser_range.first = dw.count;
     for (int i = 0; i < DUEL_LASER_POOL; i++) {
@@ -2334,71 +2510,180 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
             }
         }
         hand_range.count = dw.count - hand_range.first;
-        /* M7: menu hand-ray hover (index MCP->tip) + pinch levels. Both
-         * eyes compute the same inputs: idempotent, no per-eye drift. */
+        /* M10: menu touch (index fingertip on the panel, no pinch).
+         * Both eyes compute the same inputs: idempotent, levels only
+         * (click = press-make edge in main). */
         if (r->menu_show && r->menu) {
             DuelVec3 pax = duel_q_right(menu_q);
             DuelVec3 pay = duel_q_up(menu_q);
             DuelVec3 pn = duel_v3_scale(duel_q_forward(menu_q), -1.0f);
             float ph = DuelMenu_PanelH(r->menu);
             int order[2] = { 1, 0 }; /* right hand wins ties */
+            /* Per-hand touch state, then winner pick (pressed first). */
+            int cand_row[2] = { -1, -1 };
+            float cand_x[2] = { 0.0f, 0.0f }, cand_y[2] = { 0.0f, 0.0f };
+            int cand_near[2] = { 0, 0 };
             int o;
             r->menu_hover = -1;
             for (o = 0; o < 2; o++) {
                 int sd = order[o];
                 const DuelHand *h = DuelHands_Get(sd);
-                float pd = r->grab_pinch[sd];
-                /* Pinch level with hysteresis (click = make edge in main). */
-                if (pd < 0.035f) r->menu_pinch[sd] = 1;
-                else if (pd > 0.050f) r->menu_pinch[sd] = 0;
-                r->menu_ray_on[sd] = 0;
-                if (!h->active) continue;
-                if (!h->j[6].pos_valid || !h->j[10].pos_valid) continue;
+                DuelVec3 tip, rel;
+                float lx, ly, dist;
+                int in_bounds;
+                if (!h->active || !h->j[10].pos_valid) {
+                    DuelTouch_Level(&r->menu_press[sd], 99.0f, 0);
+                    /* M15: tracking lost mid-drag drops silently (no
+                     * re-face on a stale pose; the spot stays user's). */
+                    DuelPanelGrab_Update(&r->menu_pg[sd], 0, 0, 99.0f);
+                    continue;
+                }
+                /* NOT hw[][]: with platform meshes the joint loop
+                 * above is skipped, leaving hw uninitialized. */
+                DuelHands_JointWorld(&r->cal, s->player.orient,
+                                     s->player.pos, DUEL_SEAT_POS,
+                                     r->motion.off_p, hmo, &h->j[10],
+                                     &tip);
+                rel = duel_v3_sub(tip, menu_c);
+                dist = duel_v3_dot(rel, pn); /* + in front of the panel */
+                lx = duel_v3_dot(rel, pax);
+                ly = duel_v3_dot(rel, pay);
+                in_bounds = fabsf(lx) <= DUEL_MENU_PANEL_W * 0.5f &&
+                    fabsf(ly) <= ph * 0.5f;
+                DuelTouch_Level(&r->menu_press[sd], dist, in_bounds);
+                /* M15 drop quiet: after a drop the finger must truly lift
+                 * before it can click again (no drop-click). The level
+                 * underneath re-latches each frame; only the report is 0. */
+                if (r->menu_pgquiet[sd] && dist > DUEL_TOUCH_RELEASE_D)
+                    r->menu_pgquiet[sd] = 0;
+                if (r->menu_pgquiet[sd]) r->menu_press[sd] = 0;
+                /* M4e: no finger rays (touch UI needs no aim aid). */
+                if (in_bounds && dist > DUEL_TOUCH_BACK_D && dist < 0.30f) {
+                    cand_near[sd] = 1;
+                    cand_row[sd] = DuelMenu_HitRow(r->menu, lx, ly);
+                    cand_x[sd] = lx;
+                    cand_y[sd] = ly;
+                }
+                /* M15 pinch grab (thumb 5 + index 10; split is
+                 * frame-invariant), M17 frame latch (edges + handle
+                 * strip only: rows stay tap-only, air never latches).
+                 * One holder (order loop latches R first); latch needs
+                 * the cal valid (pre-cal: touch only, ~2 s). While held
+                 * the panel is a tablet in hand (rigid follow, wrist
+                 * steers). Both eyes run this with identical inputs:
+                 * absolute set, idempotent. */
                 {
-                    /* NOT hw[][]: with platform meshes the joint loop
-                     * above is skipped, leaving hw uninitialized. */
-                    DuelVec3 tip, mcp;
-                    DuelVec3 d;
-                    DuelHands_JointWorld(&r->cal, s->player.orient,
-                                         s->player.pos, DUEL_SEAT_POS,
-                                         r->motion.off_p, hmo, &h->j[10],
-                                         &tip);
-                    DuelHands_JointWorld(&r->cal, s->player.orient,
-                                         s->player.pos, DUEL_SEAT_POS,
-                                         r->motion.off_p, hmo, &h->j[6],
-                                         &mcp);
-                    d = duel_v3_sub(tip, mcp);
-                    float dl = duel_v3_len(d);
-                    float denom, t;
-                    if (dl < 1e-6f) continue;
-                    d = duel_v3_scale(d, 1.0f / dl);
-                    r->menu_ray_on[sd] = 1;
-                    r->menu_ray_o[sd] = tip;
-                    r->menu_ray_e[sd] = duel_v3_add(tip, duel_v3_scale(d, 1.5f));
-                    denom = duel_v3_dot(d, pn);
-                    if (fabsf(denom) < 1e-6f) continue;
-                    t = duel_v3_dot(duel_v3_sub(menu_c, tip), pn) / denom;
-                    if (t < 0.0f) continue;
-                    {
-                        DuelVec3 hit = duel_v3_add(tip, duel_v3_scale(d, t));
-                        DuelVec3 rel = duel_v3_sub(hit, menu_c);
-                        float lx = duel_v3_dot(rel, pax);
-                        float ly = duel_v3_dot(rel, pay);
-                        if (fabsf(lx) > DUEL_MENU_PANEL_W * 0.5f ||
-                            fabsf(ly) > ph * 0.5f) continue;
-                        r->menu_ray_e[sd] = hit;
-                        if (r->menu_hover < 0) {
-                            r->menu_hover = DuelMenu_HitRow(r->menu, lx, ly);
-                            r->menu_hx = lx;
-                            r->menu_hy = ly;
-                        }
+                    int was = r->menu_pg[sd].held;
+                    int pv = h->j[5].pos_valid && h->j[10].pos_valid;
+                    DuelVec3 t5 = duel_v3(0, 0, 0), t10 = duel_v3(0, 0, 0);
+                    DuelVec3 mid = duel_v3(0, 0, 0), mrel;
+                    float mdist = 99.0f, mlx = 0.0f, mly = 0.0f;
+                    int near = 0;
+                    if (pv) {
+                        DuelHands_JointWorld(&r->cal, s->player.orient,
+                                             s->player.pos, DUEL_SEAT_POS,
+                                             r->motion.off_p, hmo, &h->j[5],
+                                             &t5);
+                        DuelHands_JointWorld(&r->cal, s->player.orient,
+                                             s->player.pos, DUEL_SEAT_POS,
+                                             r->motion.off_p, hmo, &h->j[10],
+                                             &t10);
+                        mid = duel_v3_scale(duel_v3_add(t5, t10), 0.5f);
+                        mrel = duel_v3_sub(mid, menu_c);
+                        mdist = duel_v3_dot(mrel, pn);
+                        mlx = duel_v3_dot(mrel, pax);
+                        mly = duel_v3_dot(mrel, pay);
+                        near = duel_panel_frame(DUEL_MENU_PANEL_W, ph,
+                            mlx, mly, mdist);
                     }
+                    if (h->active && pv && r->cal.valid)
+                        DuelPanelGrab_Update(&r->menu_pg[sd],
+                            !r->menu_pg[sd ^ 1].held, near,
+                            duel_v3_len(duel_v3_sub(t5, t10)));
+                    else
+                        DuelPanelGrab_Update(&r->menu_pg[sd], 0, 0, 99.0f);
+                    if (!was && r->menu_pg[sd].held) {
+                        /* M17 latch: pinch->center + panel pose captured;
+                         * the spot is the user's until RECENTRAR. */
+                        r->menu_pgrel[sd] = duel_v3_sub(menu_c, mid);
+                        r->menu_pgpq[sd] = menu_q;
+                        r->menu_pgrot[sd] = 0;
+                        r->menu_moved = 1;
+                        SDL_Log("DUEL menu grab %c", sd ? 'R' : 'L');
+                    } else if (was && !r->menu_pg[sd].held) {
+                        /* M17 drop keeps the hand pose (no re-face snap);
+                         * quiet until the finger lifts (no drop-click). */
+                        r->menu_pgquiet[sd] = 1;
+                        SDL_Log("DUEL menu drop %c", sd ? 'R' : 'L');
+                    }
+                    if (r->menu_pg[sd].held && h->j[1].rot_valid) {
+                        /* M17 tablet in hand: the wrist delta since latch
+                         * swings the captured offset (rotate the wrist and
+                         * the panel turns about the pinch); absolute place
+                         * every frame, no drift. Wristless frames hold
+                         * still (no jump); first valid frame re-bases. */
+                        DuelQuat hcur = duel_panel_handq(s->player.orient,
+                            hmo, r->cal.neutral_yaw, h->j[1].quat);
+                        DuelQuat hli, dq, pqg;
+                        DuelVec3 pcg;
+                        if (!r->menu_pgrot[sd]) {
+                            r->menu_pghand[sd] = hcur;
+                            r->menu_pgrel[sd] = duel_v3_sub(menu_c, mid);
+                            r->menu_pgpq[sd] = menu_q;
+                            r->menu_pgrot[sd] = 1;
+                        }
+                        hli = duel_q(-r->menu_pghand[sd].x,
+                                     -r->menu_pghand[sd].y,
+                                     -r->menu_pghand[sd].z,
+                                     r->menu_pghand[sd].w);
+                        dq = duel_q_norm(duel_q_mul(hcur, hli));
+                        pcg = duel_v3_add(mid,
+                            duel_q_rot(dq, r->menu_pgrel[sd]));
+                        pqg = duel_q_norm(duel_q_mul(dq, r->menu_pgpq[sd]));
+                        r->menu_center = duel_panel_clamp(r->cal.neutral_pos,
+                            duel_panel_place(s->player.orient, s->player.pos,
+                                DUEL_SEAT_POS, r->motion.off_p, hmo,
+                                r->cal.neutral_pos, r->cal.neutral_yaw, pcg));
+                        r->menu_quat = duel_panel_unrot(s->player.orient,
+                            hmo, r->cal.neutral_yaw, pqg);
+                    }
+                }
+            }
+            /* M11 winner hand: pressed-on-a-row first, then any
+             * pressed near hand (gap press blocks, never misfires),
+             * then any near hand. Hover + press come from the winner,
+             * so two hands can never split row and click. */
+            {
+                int win = -1;
+                for (o = 0; o < 2 && win < 0; o++) {
+                    int sd = order[o];
+                    if (r->menu_press[sd] && cand_near[sd] &&
+                            cand_row[sd] >= 0 && !r->menu_pg[sd].held)
+                        win = sd;
+                }
+                for (o = 0; o < 2 && win < 0; o++) {
+                    int sd = order[o];
+                    if (r->menu_press[sd] && cand_near[sd] &&
+                            !r->menu_pg[sd].held)
+                        win = sd;
+                }
+                for (o = 0; o < 2 && win < 0; o++) {
+                    int sd = order[o];
+                    if (cand_near[sd] && !r->menu_pg[sd].held) win = sd;
+                }
+                if (win >= 0) {
+                    r->menu_hover = cand_row[win];
+                    r->menu_hx = cand_x[win];
+                    r->menu_hy = cand_y[win];
+                    r->menu_touch = r->menu_press[win] ? 1 : 0;
+                } else {
+                    r->menu_touch = 0;
                 }
             }
         } else {
             r->menu_hover = -1;
-            r->menu_pinch[0] = r->menu_pinch[1] = 0;
-            r->menu_ray_on[0] = r->menu_ray_on[1] = 0;
+            r->menu_press[0] = r->menu_press[1] = 0;
+            r->menu_touch = 0;
         }
         /* bones start where joints ended */
         hbone_range.first = dw.count;
@@ -2557,8 +2842,33 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
     quad_range.count = dw.count - quad_range.first;
 #endif
 #endif
+    /* M19 pause button, M24 on the REAL A-like button (right console
+     * V/C pair, combat only): the cockpit button is the visual, so no
+     * box — only a state-colored PAUSA label floating 3 cm toward the
+     * pilot (depth-tested, never coplanar with the panel). Amber idle,
+     * white near, green pressed. M26: 3.2 mm glyphs (60% smaller than
+     * M24's 8 mm; M25's 2.4 mm overshot); text sits 13 mm below the
+     * button center, clear of the 18 mm button. */
+    btn_line_range.first = dw.count;
+    if (!r->menu_show) {
+        DuelVec3 b = DUEL_PAUSEBTN_SHIP;
+        DuelVec3 bn = duel_v3_norm(duel_v3_sub(DUEL_SEAT_POS, b));
+        DuelVec3 brx = duel_v3_norm(duel_v3_cross(duel_v3(0, 1, 0), bn));
+        DuelVec3 bup = duel_v3_cross(bn, brx);
+        DuelVec3 bc = duel_v3_add(s->player.pos, duel_q_rot(s->player.orient,
+            duel_v3_add(b, duel_v3_scale(bn, 0.030f))));
+        DuelVec3 bpx = duel_q_rot(s->player.orient, brx);
+        DuelVec3 bpy = duel_q_rot(s->player.orient, bup);
+        float lr, lg, lb;
+        if (r->pausebtn_prev) { lr = 0.40f; lg = 1.0f; lb = 0.50f; }
+        else if (r->pausebtn_near) { lr = 1.0f; lg = 1.0f; lb = 1.0f; }
+        else { lr = 1.0f; lg = 0.85f; lb = 0.40f; }
+        duel_menu_text(&dw, bc, bpx, bpy, "PAUSA", 0.0f, -0.013f, 0.0032f,
+                       1, lr, lg, lb);
+    }
+    btn_line_range.count = dw.count - btn_line_range.first;
     /* M7 menu panel (world-locked; hands AND controllers). Two pure
-     * passes: tris (bg/rows/sliders/border) then glyph/ray lines.
+     * passes: tris (bg/rows/sliders/border) then glyph lines.
      * Pipes need pure slices, so text runs in a second loop. */
     menu_tri_range.first = dw.count;
     menu_line_range.first = dw.count;
@@ -2567,41 +2877,55 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         DuelVec3 pay = duel_q_up(menu_q);
         DuelVec3 cc = duel_v3_add(menu_c,
             duel_v3_scale(duel_q_forward(menu_q), -0.002f));
+        /* M18 depth layers (mm toward the user): bg 2, rows/borders 3,
+         * slider track 3.5 / fill 4, glyphs 5 (line pass). Coplanar
+         * paint z-fought (moving diagonals); stacked paint cannot. */
+        DuelVec3 pn = duel_v3_scale(duel_q_forward(menu_q), -1.0f);
+        DuelVec3 ccr = duel_v3_add(cc, duel_v3_scale(pn, 0.001f));
+        DuelVec3 cct = duel_v3_add(cc, duel_v3_scale(pn, 0.0015f));
+        DuelVec3 ccf = duel_v3_add(cc, duel_v3_scale(pn, 0.002f));
         float ph = DuelMenu_PanelH(r->menu);
         float pw = DUEL_MENU_PANEL_W;
         DuelMenuRow rows[DUEL_MENU_MAXROWS];
         int n = DuelMenu_Rows(r->menu, rows, DUEL_MENU_MAXROWS);
         int i, hl = r->menu_hover >= 0 ? r->menu_hover : r->menu->sel;
-        float bw = 0.006f;
+        float bw = 0.0027f * DUEL_MENU_SCALE; /* M11 value, M16 scale */
+        /* M16: paint is opaque (the 0.90-0.93 translucency bled the
+         * cockpit through = the color noise the user reported). */
         duel_menu_quad(&dw, cc, pax, pay, -pw * 0.5f, -ph * 0.5f,
-                       pw * 0.5f, ph * 0.5f, 0.015f, 0.020f, 0.045f, 0.93f);
-        duel_menu_quad(&dw, cc, pax, pay, -pw * 0.5f, ph * 0.5f - bw,
+                       pw * 0.5f, ph * 0.5f, 0.015f, 0.020f, 0.045f, 1.0f);
+        duel_menu_quad(&dw, ccr, pax, pay, -pw * 0.5f, ph * 0.5f - bw,
                        pw * 0.5f, ph * 0.5f, 1.0f, 0.72f, 0.25f, 1.0f);
-        duel_menu_quad(&dw, cc, pax, pay, -pw * 0.5f, -ph * 0.5f,
+        duel_menu_quad(&dw, ccr, pax, pay, -pw * 0.5f, -ph * 0.5f,
                        pw * 0.5f, -ph * 0.5f + bw, 1.0f, 0.72f, 0.25f, 1.0f);
-        duel_menu_quad(&dw, cc, pax, pay, -pw * 0.5f, -ph * 0.5f,
+        duel_menu_quad(&dw, ccr, pax, pay, -pw * 0.5f, -ph * 0.5f,
                        -pw * 0.5f + bw, ph * 0.5f, 1.0f, 0.72f, 0.25f, 1.0f);
-        duel_menu_quad(&dw, cc, pax, pay, pw * 0.5f - bw, -ph * 0.5f,
+        duel_menu_quad(&dw, ccr, pax, pay, pw * 0.5f - bw, -ph * 0.5f,
                        pw * 0.5f, ph * 0.5f, 1.0f, 0.72f, 0.25f, 1.0f);
         for (i = 0; i < n; i++) {
             float x0, y0, x1, y1;
             if (rows[i].kind == DUEL_ROW_LABEL) continue;
             if (!DuelMenu_RowRect(r->menu, i, &x0, &y0, &x1, &y1)) continue;
             if (i == hl)
-                duel_menu_quad(&dw, cc, pax, pay, x0, y0, x1, y1,
-                               0.10f, 0.32f, 0.42f, 0.90f);
+                duel_menu_quad(&dw, ccr, pax, pay, x0, y0, x1, y1,
+                               0.10f, 0.32f, 0.42f, 1.0f);
             else
-                duel_menu_quad(&dw, cc, pax, pay, x0, y0, x1, y1,
-                               0.05f, 0.07f, 0.12f, 0.90f);
+                duel_menu_quad(&dw, ccr, pax, pay, x0, y0, x1, y1,
+                               0.05f, 0.07f, 0.12f, 1.0f);
             if (rows[i].kind == DUEL_ROW_SLIDER) {
-                float fy = y0 + 0.018f;
-                float fx = x0 + 0.03f + (x1 - x0 - 0.06f) *
+                float fy = y0 + 0.0082f * DUEL_MENU_SCALE;
+                float fx = x0 + 0.0136f * DUEL_MENU_SCALE +
+                    (x1 - x0 - 0.0273f * DUEL_MENU_SCALE) *
                     duel_menu_selfrac(r->menu, i);
-                duel_menu_quad(&dw, cc, pax, pay, x0 + 0.03f, fy,
-                               x1 - 0.03f, fy + 0.008f,
+                duel_menu_quad(&dw, cct, pax, pay,
+                               x0 + 0.0136f * DUEL_MENU_SCALE, fy,
+                               x1 - 0.0136f * DUEL_MENU_SCALE,
+                               fy + 0.0036f * DUEL_MENU_SCALE,
                                0.20f, 0.22f, 0.30f, 1.0f);
-                duel_menu_quad(&dw, cc, pax, pay, x0 + 0.03f, fy, fx,
-                               fy + 0.008f, 0.30f, 0.85f, 1.0f, 1.0f);
+                duel_menu_quad(&dw, ccf, pax, pay,
+                               x0 + 0.0136f * DUEL_MENU_SCALE, fy, fx,
+                               fy + 0.0036f * DUEL_MENU_SCALE,
+                               0.30f, 0.85f, 1.0f, 1.0f);
             }
         }
     }
@@ -2611,11 +2935,14 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         DuelVec3 pax = duel_q_right(menu_q);
         DuelVec3 pay = duel_q_up(menu_q);
         DuelVec3 cc = duel_v3_add(menu_c,
-            duel_v3_scale(duel_q_forward(menu_q), -0.004f));
+            duel_v3_scale(duel_q_forward(menu_q), -0.005f)); /* M18 top */
         float ph = DuelMenu_PanelH(r->menu);
+        float pw = DUEL_MENU_PANEL_W;
         DuelMenuRow rows[DUEL_MENU_MAXROWS];
         int n = DuelMenu_Rows(r->menu, rows, DUEL_MENU_MAXROWS);
-        float tsz = 0.0121f, rsz = 0.0072f, hsz = 0.0050f;
+        float tsz = 0.00550f * DUEL_MENU_SCALE; /* M11 values, M16 scale */
+        float rsz = 0.00327f * DUEL_MENU_SCALE;
+        float hsz = 0.00227f * DUEL_MENU_SCALE;
         int i;
         float ty = ph * 0.5f - DUEL_MENU_PAD - DUEL_MENU_TITLE_H * 0.5f -
             3.5f * tsz;
@@ -2647,25 +2974,34 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
                 char val[16];
                 if (!DuelMenu_RowRect(r->menu, i, &x0, &y0, &x1, &y1)) continue;
                 by = y0 + (DUEL_MENU_ROW_H - 7.0f * rsz) * 0.5f;
-                duel_menu_text(&dw, cc, pax, pay, rows[i].label, x0 + 0.03f,
+                duel_menu_text(&dw, cc, pax, pay, rows[i].label,
+                               x0 + 0.0136f * DUEL_MENU_SCALE,
                                by, rsz, 0, 0.85f, 0.88f, 0.95f);
                 DuelMenu_RowValue(r->menu, i, val, sizeof(val));
                 if (val[0])
-                    duel_menu_text(&dw, cc, pax, pay, val, x1 - 0.03f, by,
+                    duel_menu_text(&dw, cc, pax, pay, val,
+                                   x1 - 0.0136f * DUEL_MENU_SCALE, by,
                                    rsz, 2, 0.65f, 0.95f, 1.0f);
             }
         }
-        duel_menu_text(&dw, cc, pax, pay, "APUNTA + PELLIZCA / GATILLO",
-                       0.0f, ph * -0.5f - 0.055f, hsz, 1,
+        duel_menu_text(&dw, cc, pax, pay, "TOCA LA PANTALLA / GATILLO",
+                       0.0f, ph * -0.5f - 0.025f * DUEL_MENU_SCALE, hsz, 1,
                        0.55f, 0.60f, 0.68f);
-        for (i = 0; i < 2; i++) {
-            float *v;
-            if (!r->menu_ray_on[i]) continue;
-            v = dyn_reserve(&dw, 2);
-            if (!v) break;
-            dyn_vert(v, r->menu_ray_o[i], 0.3f, 0.9f, 1.0f, 0.9f);
-            dyn_vert(v + 9, r->menu_ray_e[i], 0.3f, 0.9f, 1.0f, 0.15f);
+        /* M18 side grips: 3 ticks per border (grab here: sides only). */
+        {
+            float gi = 0.008f * DUEL_MENU_SCALE;
+            float go = 0.002f * DUEL_MENU_SCALE;
+            float gy0 = 0.012f * DUEL_MENU_SCALE;
+            float k;
+            for (k = -1.0f; k <= 1.0f; k += 1.0f) {
+                float gy = k * gy0;
+                duel_menu_seg(&dw, cc, pax, pay, -pw * 0.5f - go, gy,
+                              -pw * 0.5f + gi, gy, 0.12f, 0.10f, 0.08f);
+                duel_menu_seg(&dw, cc, pax, pay, pw * 0.5f - gi, gy,
+                              pw * 0.5f + go, gy, 0.12f, 0.10f, 0.08f);
+            }
         }
+        /* M4e: finger-ray draw removed (touch UI). */
     }
     menu_line_range.count = dw.count - menu_line_range.first;
     /* reticle: XWA-style gunsight (cross + circle + center dot) collimated
@@ -3171,6 +3507,21 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         SDL_DrawGPUPrimitives(rp, (Uint32)mid_range.count, 1, (Uint32)mid_range.first, 0);
     }
 #endif
+    /* M7 menu panel: world-space tris (alpha, depth-tested + writes)
+     * first, then glyph strokes (lines, depth-tested). M14: drawn BEFORE
+     * the hands so touching fingers (closer) overdraw the panel while
+     * hands behind it stay hidden. Empty ranges when the panel is
+     * hidden, so count>0 is the only gate needed. */
+    if (menu_tri_range.count > 0) {
+        SDL_BindGPUGraphicsPipeline(rp, r->pipe_menu_tri);
+        SDL_PushGPUVertexUniformData(cmd, 0, &uvsu, sizeof uvsu);
+        SDL_DrawGPUPrimitives(rp, (Uint32)menu_tri_range.count, 1, (Uint32)menu_tri_range.first, 0);
+    }
+    if (menu_line_range.count > 0) {
+        SDL_BindGPUGraphicsPipeline(rp, r->pipe_menu_line);
+        SDL_PushGPUVertexUniformData(cmd, 0, &uvsu, sizeof uvsu);
+        SDL_DrawGPUPrimitives(rp, (Uint32)menu_line_range.count, 1, (Uint32)menu_line_range.first, 0);
+    }
 #if DUEL_VIRTUAL_HANDS
     /* M3.0: hand joints (points) + bones (depth-tested lines). */
     if (hbone_range.count > 0) {
@@ -3190,6 +3541,12 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         SDL_BindGPUGraphicsPipeline(rp, r->pipe_tri_test);
         SDL_PushGPUVertexUniformData(cmd, 0, &uvsu, sizeof uvsu);
         SDL_DrawGPUPrimitives(rp, (Uint32)quad_range.count, 1, (Uint32)quad_range.first, 0);
+    }
+    /* M19/M21 pause button label (depth-tested lines). */
+    if (btn_line_range.count > 0) {
+        SDL_BindGPUGraphicsPipeline(rp, r->pipe_menu_line);
+        SDL_PushGPUVertexUniformData(cmd, 0, &uvsu, sizeof uvsu);
+        SDL_DrawGPUPrimitives(rp, (Uint32)btn_line_range.count, 1, (Uint32)btn_line_range.first, 0);
     }
 #if DUEL_HAND_MESH
     /* M3.5: platform hand meshes (opaque, depth-tested; one indexed draw
@@ -3234,19 +3591,6 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
             SDL_DrawGPUPrimitives(rp, (Uint32)hud_range.count, 1, (Uint32)hud_range.first, 0);
         if (flash_range.count > 0)
             SDL_DrawGPUPrimitives(rp, (Uint32)flash_range.count, 1, (Uint32)flash_range.first, 0);
-    }
-    /* M7 menu panel: world-space tris (alpha, depth off) first, then
-     * glyph strokes + hand rays (lines, depth off). Empty ranges when
-     * the panel is hidden, so count>0 is the only gate needed. */
-    if (menu_tri_range.count > 0) {
-        SDL_BindGPUGraphicsPipeline(rp, r->pipe_tri_alpha);
-        SDL_PushGPUVertexUniformData(cmd, 0, &uvsu, sizeof uvsu);
-        SDL_DrawGPUPrimitives(rp, (Uint32)menu_tri_range.count, 1, (Uint32)menu_tri_range.first, 0);
-    }
-    if (menu_line_range.count > 0) {
-        SDL_BindGPUGraphicsPipeline(rp, r->pipe_lines);
-        SDL_PushGPUVertexUniformData(cmd, 0, &uvsu, sizeof uvsu);
-        SDL_DrawGPUPrimitives(rp, (Uint32)menu_line_range.count, 1, (Uint32)menu_line_range.first, 0);
     }
     /* P1.5: authentic sprites. Lit shaders, vertex-baked world quads
      * (model=identity, mvp=vp): black base kills the lit term, the sprite

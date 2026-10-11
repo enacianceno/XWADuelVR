@@ -227,6 +227,12 @@ typedef struct DuelSeatCal {
     int valid;
     int generation;       /* P0.5 §12: capture count; a change mid-flight is a bug */
     int reason;           /* P0.5 §12: DuelCalReason of the last capture */
+    /* M10 home view: the first reference (boot INIT, or the latest
+     * explicit recenter). Death resets RESTORE it instead of capturing
+     * the death head pose, so view + ship return to the start point. */
+    DuelVec3 home_pos;
+    float home_yaw;
+    int home_valid;
 } DuelSeatCal;
 
 /* Yaw of a quaternion: the Y rotation mapping -Z to its forward. */
@@ -246,6 +252,49 @@ static inline void duel_cal_capture(DuelSeatCal *cal, DuelVec3 hmd_pos, DuelQuat
     cal->reason = reason;
 }
 
+/* M10: store the current neutral as the home view (call after an
+ * INIT/RECENTER capture; a RESET capture only when no home exists yet). */
+static inline void duel_cal_home_store(DuelSeatCal *cal) {
+    if (!cal->valid) return;
+    cal->home_pos = cal->neutral_pos;
+    cal->home_yaw = cal->neutral_yaw;
+    cal->home_valid = 1;
+}
+
+/* M10: restore the home view as the neutral (death reset). No-op without
+ * a home. Bumps the generation (neutral changed) with RESET reason. */
+static inline void duel_cal_home_restore(DuelSeatCal *cal) {
+    if (!cal->home_valid) return;
+    cal->neutral_pos = cal->home_pos;
+    cal->neutral_yaw = cal->home_yaw;
+    cal->valid = 1;
+    cal->generation++;
+    cal->reason = DUEL_CAL_RESET;
+}
+
+/* M12: one-shot explosion gate: fires once when a SEEN-ALIVE ship
+ * dies. Ships parked dead by the battle size never fire (never seen),
+ * so no ghost explosions and no stuck fullscreen flash. Returns 1 on
+ * the firing frame (caller spawns FX + flash). Rearm snapshots
+ * seen=alive + boom=0 on a fresh wave. */
+static inline int duel_fx_boom(int *seen_alive, int alive, int *boom_done) {
+    if (alive) { *seen_alive = 1; return 0; }
+    if (*seen_alive && !*boom_done) { *boom_done = 1; return 1; }
+    return 0;
+}
+
+/* M11: LOCAL anchor for a seat-frame panel point. The eye path maps
+ * LOCAL -> neutral -> seat -> ship -> world; this inverts the first
+ * step, so neutralizing the anchor returns the offset exactly (cockpit-
+ * fixed panel). Yaw-only orientation facing the seat (same convention
+ * as the head-placed panel: forward points INTO the screen). */
+static inline void duel_home_anchor(const DuelSeatCal *cal, DuelVec3 seat_off,
+                                    DuelVec3 *out_pos, DuelQuat *out_q) {
+    DuelQuat yq = duel_q_axis_angle(duel_v3(0, 1, 0), cal->neutral_yaw);
+    *out_pos = duel_v3_add(cal->neutral_pos, duel_q_rot(yq, seat_off));
+    *out_q = yq;
+}
+
 /* Neutralize a LOCAL HMD pose into the seat frame. Uncalibrated (valid=0)
  * passes through untouched. */
 static inline void duel_cal_neutralize(const DuelSeatCal *cal, DuelVec3 hmd_pos, DuelQuat hmd_q,
@@ -254,6 +303,75 @@ static inline void duel_cal_neutralize(const DuelSeatCal *cal, DuelVec3 hmd_pos,
     DuelQuat yc = duel_q_axis_angle(duel_v3(0, 1, 0), -cal->neutral_yaw);
     *out_pos = duel_q_rot(yc, duel_v3_sub(hmd_pos, cal->neutral_pos));
     *out_q = duel_q_norm(duel_q_mul(yc, hmd_q));
+}
+
+/* M17 tablet follow: absolute game->LOCAL place (full inverse of
+ * neutralize + eye path). The held panel is set from the hand every
+ * frame: no drift, wrist rotation included. Pure. */
+static inline DuelVec3 duel_panel_place(DuelQuat ship_q, DuelVec3 ship_t,
+                                        DuelVec3 seat_t, DuelVec3 mo_p,
+                                        DuelQuat mo_q, DuelVec3 neutral,
+                                        float yaw, DuelVec3 gp) {
+    DuelQuat qi = duel_q(-ship_q.x, -ship_q.y, -ship_q.z, ship_q.w);
+    DuelQuat mi = duel_q(-mo_q.x, -mo_q.y, -mo_q.z, mo_q.w);
+    DuelVec3 v = duel_q_rot(qi, duel_v3_sub(gp, ship_t));
+    v = duel_q_rot(mi, duel_v3_sub(v, mo_p));
+    v = duel_v3_sub(v, seat_t);
+    v = duel_q_rot(duel_q_axis_angle(duel_v3(0, 1, 0), yaw), v);
+    return duel_v3_add(neutral, v);
+}
+
+/* M17: a LOCAL hand orientation forward to game space (pairs with
+ * unrot; the wrist steers the held panel). */
+static inline DuelQuat duel_panel_handq(DuelQuat ship_q, DuelQuat mo_q,
+                                        float neutral_yaw, DuelQuat hl) {
+    DuelQuat yq = duel_q_axis_angle(duel_v3(0, 1, 0), -neutral_yaw);
+    return duel_q_norm(duel_q_mul(ship_q, duel_q_mul(mo_q,
+                                 duel_q_mul(yq, hl))));
+}
+
+/* M17 latch zone, M18 narrowed to the SIDES only (user order: no
+ * top/bottom/corners). The side bands stop EDGE short of the panel
+ * top/bottom (no corners) and short of the rows (rows start PAD=0.0286
+ * inside > EDGE, so rows stay 100% tap-only). lx/ly/dist: pinch
+ * midpoint in panel-local coords (+ in front). */
+#define DUEL_PANEL_FRAME_EDGE 0.025f  /* side band inside the edges */
+#define DUEL_PANEL_FRAME_OUT 0.03f    /* tolerance outside the panel */
+#define DUEL_PANEL_FRAME_FRONT 0.12f  /* max pinch distance in front */
+#define DUEL_PANEL_FRAME_BACK -0.08f  /* max pinch distance behind */
+static inline int duel_panel_frame(float pw, float ph,
+                                   float lx, float ly, float dist) {
+    float ex = pw * 0.5f - fabsf(lx);
+    int side = ex <= DUEL_PANEL_FRAME_EDGE &&
+        fabsf(lx) <= pw * 0.5f + DUEL_PANEL_FRAME_OUT;
+    int mid = ly >= -ph * 0.5f + DUEL_PANEL_FRAME_EDGE &&
+        ly <= ph * 0.5f - DUEL_PANEL_FRAME_EDGE;
+    int in_d = dist >= DUEL_PANEL_FRAME_BACK &&
+        dist <= DUEL_PANEL_FRAME_FRONT;
+    return side && mid && in_d;
+}
+
+/* M15/M17: a game orientation back to the LOCAL anchor (M17: the
+ * live tablet orientation, set from the wrist every held frame). */
+static inline DuelQuat duel_panel_unrot(DuelQuat ship_q, DuelQuat mo_q,
+                                        float neutral_yaw, DuelQuat gq) {
+    DuelQuat qi = duel_q(-ship_q.x, -ship_q.y, -ship_q.z, ship_q.w);
+    DuelQuat mi = duel_q(-mo_q.x, -mo_q.y, -mo_q.z, mo_q.w);
+    DuelQuat yq = duel_q_axis_angle(duel_v3(0, 1, 0), neutral_yaw);
+    return duel_q_norm(duel_q_mul(yq, duel_q_mul(mi, duel_q_mul(qi, gq))));
+}
+
+/* M15 reach clamp: the dragged panel stays in a shell around the
+ * neutral head point (never lost behind, never inside the face). */
+#define DUEL_PANEL_MIN_D 0.30f
+#define DUEL_PANEL_MAX_D 1.00f
+static inline DuelVec3 duel_panel_clamp(DuelVec3 neutral, DuelVec3 c) {
+    DuelVec3 d = duel_v3_sub(c, neutral);
+    float l = duel_v3_len(d);
+    if (l < 1e-6f)
+        return duel_v3_add(neutral, duel_v3(0, 0, -DUEL_PANEL_MIN_D));
+    return duel_v3_add(neutral, duel_v3_scale(d,
+        duel_clampf(l, DUEL_PANEL_MIN_D, DUEL_PANEL_MAX_D) / l));
 }
 
 #endif /* XWADUELVR_MATH_H */

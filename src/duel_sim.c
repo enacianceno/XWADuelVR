@@ -40,6 +40,7 @@ static void duel_ship_reset(DuelShip *s, DuelVec3 pos, DuelQuat orient, float hp
 void Duel_Init(DuelState *s) {
     memset(s, 0, sizeof(*s));
     s->diff = 1; /* M7: pilot = frozen baseline (reset preserves it) */
+    s->skirmish = DUEL_SKIRMISH_DEFAULT; /* M10: 3v3 battle */
     Duel_ResetCombat(s);
     s->time = 0.0f;
 }
@@ -64,7 +65,9 @@ void Duel_HandLever(DuelState *s, int active, float roll) {
  * Pilot (1) is the identity = frozen M5/M6 baseline. */
 static void duel_diff_mults(int diff, float *hp, float *spd,
                             float *turn, float *cd) {
-    if (diff <= 0) { *hp = 0.7f; *spd = 0.85f; *turn = 0.8f; *cd = 1.3f; }
+    /* M9 EASY: wider turns (overshoots cross the nose) + slower refire.
+     * HP/speed unchanged from M3.8c/M5 (fair fight, not target practice). */
+    if (diff <= 0) { *hp = 0.7f; *spd = 0.85f; *turn = 0.65f; *cd = 1.6f; }
     else if (diff >= 2) { *hp = 1.3f; *spd = 1.1f; *turn = 1.15f; *cd = 0.8f; }
     else { *hp = 1.0f; *spd = 1.0f; *turn = 1.0f; *cd = 1.0f; }
 }
@@ -73,6 +76,23 @@ void Duel_SetDifficulty(DuelState *s, int diff) {
     if (diff < 0) diff = 0;
     if (diff > 2) diff = 2;
     s->diff = diff;
+}
+
+void Duel_SetSkirmish(DuelState *s, int n) {
+    if (n < DUEL_SKIRMISH_MIN) n = DUEL_SKIRMISH_MIN;
+    if (n > DUEL_SKIRMISH_MAX) n = DUEL_SKIRMISH_MAX;
+    s->skirmish = n;
+}
+
+int Duel_TiesWanted(const DuelState *s) {
+    int n = s ? s->skirmish : DUEL_SKIRMISH_DEFAULT;
+    if (n < DUEL_SKIRMISH_MIN) n = DUEL_SKIRMISH_MIN;
+    if (n > DUEL_SKIRMISH_MAX) n = DUEL_SKIRMISH_MAX;
+    return n;
+}
+
+int Duel_AlliesWanted(const DuelState *s) {
+    return Duel_TiesWanted(s) - 1;
 }
 
 void Duel_SetHandDead(DuelState *s, float dead) {
@@ -90,6 +110,7 @@ void Duel_ResetCombat(DuelState *s) {
     float htv = s->hand_thr_value;
     int df = s->diff;
     float hd = s->hand_dead;
+    int sk = s->skirmish;
     memset(s, 0, sizeof(*s));
     s->kills_player = kp;
     s->kills_tie = kt;
@@ -99,17 +120,28 @@ void Duel_ResetCombat(DuelState *s) {
     /* M7: difficulty + hand deadzone survive resets (menu-owned). */
     s->diff = df;
     s->hand_dead = hd > 0.0f ? hd : DUEL_DEADZONE;
+    /* M10: battle size survives resets (menu-owned). */
+    s->skirmish = sk >= DUEL_SKIRMISH_MIN && sk <= DUEL_SKIRMISH_MAX ? sk
+        : DUEL_SKIRMISH_DEFAULT;
     s->phase = DUEL_PHASE_COMBAT;
     duel_ship_reset(&s->player, duel_v3(0, 0, 0), duel_q_identity(), DUEL_PLAYER_HP);
     if (hta) s->player.throttle = duel_clampf(htv, 0.0f, 1.0f);
     /* M5: TIE formation ahead (loose vee, staggered), each facing the
-     * player; allies echeloned on the player's flanks, facing forward. */
+     * player; allies echeloned on the player's flanks, facing forward.
+     * M10: all slots spawned (positions deterministic), only the wanted
+     * ships alive; extras parked dead. First 3 + 2 slots = the frozen
+     * M5 formation, verbatim. */
     {
-        static const float tox[DUEL_TIE_COUNT] = { 0.0f, -420.0f, 380.0f };
-        static const float toy[DUEL_TIE_COUNT] = { 0.0f, -140.0f, 220.0f };
-        static const float toz[DUEL_TIE_COUNT] = { 0.0f, -160.0f, -320.0f };
-        static const float aox[DUEL_ALLY_COUNT] = { -170.0f, 170.0f };
-        static const float aoy[DUEL_ALLY_COUNT] = { 30.0f, -30.0f };
+        static const float tox[DUEL_TIE_COUNT] =
+            { 0.0f, -420.0f, 380.0f, -700.0f, 700.0f };
+        static const float toy[DUEL_TIE_COUNT] =
+            { 0.0f, -140.0f, 220.0f, 300.0f, -260.0f };
+        static const float toz[DUEL_TIE_COUNT] =
+            { 0.0f, -160.0f, -320.0f, -500.0f, -660.0f };
+        static const float aox[DUEL_ALLY_COUNT] =
+            { -170.0f, 170.0f, -340.0f, 340.0f };
+        static const float aoy[DUEL_ALLY_COUNT] =
+            { 30.0f, -30.0f, 60.0f, -60.0f };
         int i;
         float dhp, dsp, dtn, dcd;
         duel_diff_mults(s->diff, &dhp, &dsp, &dtn, &dcd);
@@ -121,11 +153,19 @@ void Duel_ResetCombat(DuelState *s) {
             duel_ship_reset(&s->ties[i], tp,
                             duel_face_quat(tp, duel_v3(0, 0, 0)),
                             DUEL_TIE_HP * dhp);
+            if (i >= Duel_TiesWanted(s)) {
+                s->ties[i].alive = 0;
+                s->ties[i].hp = 0.0f;
+            }
         }
         for (i = 0; i < DUEL_ALLY_COUNT; i++) {
             duel_ship_reset(&s->allies[i],
                             duel_v3(aox[i], aoy[i], 190.0f + 60.0f * i),
                             duel_q_identity(), DUEL_ALLY_HP);
+            if (i >= Duel_AlliesWanted(s)) {
+                s->allies[i].alive = 0;
+                s->allies[i].hp = 0.0f;
+            }
         }
     }
     /* ai[]/ai_t[] zeroed by the memset above = ACQUIRE/0 for all. */
@@ -375,6 +415,7 @@ static void duel_update_tie(DuelState *s, int idx, float dt) {
     float wob;
     DuelVec3 side;
     float turn_rate, max_spd; /* M7: difficulty-scaled (pilot = consts) */
+    float evade_dist, evade_time, fire_dot, fire_range; /* M9 easy envelope */
     if (!t->alive) return;
     if (t->fire_cd > 0.0f) t->fire_cd -= dt;
     s->ai_t[idx] += dt;
@@ -397,6 +438,15 @@ static void duel_update_tie(DuelState *s, int idx, float dt) {
         turn_rate = DUEL_TIE_TURN_RATE * dtn;
         max_spd = DUEL_TIE_MIN_SPEED + (DUEL_TIE_MAX_SPEED - DUEL_TIE_MIN_SPEED) * dsp;
     }
+    /* M9 EASY envelope: earlier/longer breaks, tighter/shorter fire gate.
+     * Pilot/ace use the consts verbatim (frozen M5/M6 behavior). */
+    {
+        int easy = (s->diff <= 0);
+        evade_dist = easy ? 130.0f : DUEL_TIE_EVADE_DIST;
+        evade_time = easy ? 3.0f : DUEL_TIE_EVADE_TIME;
+        fire_dot = easy ? 0.980f : DUEL_TIE_FIRE_CONE_DOT;
+        fire_range = easy ? 500.0f : DUEL_TIE_FIRE_RANGE;
+    }
 
     switch (s->ai[idx]) {
     case DUEL_TIE_ACQUIRE:
@@ -405,31 +455,34 @@ static void duel_update_tie(DuelState *s, int idx, float dt) {
         if (dist < DUEL_TIE_CHASE_DIST) { s->ai[idx] = DUEL_TIE_CHASE; s->ai_t[idx] = 0; }
         break;
     case DUEL_TIE_CHASE: {
-        t->throttle = dist > DUEL_TIE_CHASE_DIST ? 1.0f : 0.5f; /* M5: was
+        /* M9 easy: brisker close chase (overshoots, never sits behind). */
+        float close_thr = (s->diff <= 0) ? 0.65f : 0.5f;
+        t->throttle = dist > DUEL_TIE_CHASE_DIST ? 1.0f : close_thr; /* M5: was
             0.6 (looser tail when close: the player pulls away, more
             passes instead of glue) */
         DuelVec3 lead = duel_v3_add(dir_player, duel_v3_scale(side, wob));
         t->orient = Duel_SteerToward(t->orient, lead, turn_rate, dt);
         float facing = duel_v3_dot(duel_v3_norm(fwd), dir_player);
-        if (facing > DUEL_TIE_FIRE_CONE_DOT && dist < DUEL_TIE_FIRE_RANGE) {
+        if (facing > fire_dot && dist < fire_range) {
             s->ai[idx] = DUEL_TIE_ATTACK; s->ai_t[idx] = 0;
-        } else if (dist < DUEL_TIE_EVADE_DIST) {
+        } else if (dist < evade_dist) {
             s->ai[idx] = DUEL_TIE_EVADE; s->ai_t[idx] = 0;
             s->evade_dir[idx] = duel_v3_norm(duel_v3_add(side, duel_v3(0, wob > 0 ? 0.5f : -0.5f, 0)));
         }
         break;
     }
     case DUEL_TIE_ATTACK: {
-        t->throttle = 0.70f; /* M3.8b: was 0.55 (overshoots instead of
-                                gluing to the tail) */
+        /* M9 easy: runs through the firing pass (crosses the nose). */
+        t->throttle = (s->diff <= 0) ? 0.85f : 0.70f; /* M3.8b: was 0.55
+            (overshoots instead of gluing to the tail) */
         t->orient = Duel_SteerToward(t->orient, dir_player, turn_rate * 0.8f, dt);
         float facing = duel_v3_dot(duel_v3_norm(duel_q_forward(t->orient)), dir_player);
-        if (facing > DUEL_TIE_FIRE_CONE_DOT && dist < DUEL_TIE_FIRE_RANGE)
+        if (facing > fire_dot && dist < fire_range)
             duel_fire(s, DUEL_SHIP_TIE, idx);
-        if (dist < DUEL_TIE_EVADE_DIST) {
+        if (dist < evade_dist) {
             s->ai[idx] = DUEL_TIE_EVADE; s->ai_t[idx] = 0;
             s->evade_dir[idx] = duel_v3_norm(duel_v3_add(side, duel_v3(0, 0.6f, 0)));
-        } else if (facing < DUEL_TIE_FIRE_CONE_DOT - 0.05f || dist > DUEL_TIE_FIRE_RANGE * 1.2f) {
+        } else if (facing < fire_dot - 0.05f || dist > fire_range * 1.2f) {
             s->ai[idx] = DUEL_TIE_CHASE; s->ai_t[idx] = 0;
         }
         break;
@@ -437,17 +490,34 @@ static void duel_update_tie(DuelState *s, int idx, float dt) {
     case DUEL_TIE_EVADE:
         t->throttle = 1.0f;
         t->orient = Duel_SteerToward(t->orient, s->evade_dir[idx], turn_rate * 1.2f, dt);
-        if (s->ai_t[idx] > DUEL_TIE_EVADE_TIME || dist > DUEL_TIE_CHASE_DIST * 1.4f) {
+        if (s->ai_t[idx] > evade_time || dist > DUEL_TIE_CHASE_DIST * 1.4f) {
             s->ai[idx] = DUEL_TIE_REACQUIRE; s->ai_t[idx] = 0;
         }
         break;
-    case DUEL_TIE_REACQUIRE:
+    case DUEL_TIE_REACQUIRE: {
         t->throttle = 0.7f;
-        t->orient = Duel_SteerToward(t->orient, dir_player, turn_rate, dt);
-        if (duel_v3_dot(duel_v3_norm(duel_q_forward(t->orient)), dir_player) > 0.9f) {
+        /* M9 easy: fly a crossing pass ahead of the target's nose (+/- a
+         * per-ship lateral offset) instead of beelining at it: the TIE
+         * sweeps across the player's view, giving a chase opening. */
+        DuelVec3 goal = dir_player;
+        if (s->diff <= 0) {
+            DuelVec3 tfwd = duel_q_forward(p->orient);
+            DuelVec3 cross = duel_v3_add(p->pos, duel_v3_scale(tfwd, 250.0f));
+            float lat = (idx % 2 == 0) ? 150.0f : -150.0f;
+            cross = duel_v3_add(cross, duel_v3_scale(side, lat));
+            {
+                DuelVec3 to_cross = duel_v3_sub(cross, t->pos);
+                if (duel_v3_len(to_cross) > 1e-3f)
+                    goal = duel_v3_norm(to_cross);
+            }
+        }
+        t->orient = Duel_SteerToward(t->orient, goal, turn_rate, dt);
+        if (duel_v3_dot(duel_v3_norm(duel_q_forward(t->orient)), dir_player) > 0.9f ||
+                (s->diff <= 0 && (dist < 150.0f || s->ai_t[idx] > 6.0f))) {
             s->ai[idx] = DUEL_TIE_CHASE; s->ai_t[idx] = 0;
         }
         break;
+    }
     }
     float target = DUEL_TIE_MIN_SPEED + (max_spd - DUEL_TIE_MIN_SPEED) * t->throttle;
     float ds = target - t->speed;

@@ -4,7 +4,35 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "duel_sim.h" /* M10: skirmish size range (pure header) */
+
 static const char *kDiffName[3] = { "FACIL", "NORMAL", "DIFICIL" };
+
+/* M10: brief force lines follow the battle size (X-WING VS n TIE /
+ * ALIADOS: n X-WING, SIN ALIADOS at 1v1). Rebuilt on init, screen
+ * change, and BATALLA cycle (rows point at these buffers). */
+static void duel_refresh_brief(DuelMenu *m) {
+    int want = m->skirmish;
+    int allies;
+    if (want < DUEL_SKIRMISH_MIN || want > DUEL_SKIRMISH_MAX)
+        want = DUEL_SKIRMISH_DEFAULT;
+    allies = want - 1;
+    snprintf(m->dyn[4], sizeof(m->dyn[4]), "X-WING VS %d TIE", want);
+    if (allies > 0)
+        snprintf(m->dyn[5], sizeof(m->dyn[5]), "ALIADOS: %d X-WING",
+                 allies);
+    else
+        snprintf(m->dyn[5], sizeof(m->dyn[5]), "SIN ALIADOS");
+}
+
+/* M19: RESULT series line follows round/won/best (clamped for display). */
+static void duel_refresh_series(DuelMenu *m) {
+    int best = (m->series_best == 1 || m->series_best == 5) ? m->series_best : 3;
+    int round = m->series_round < 1 ? 1 : m->series_round;
+    int won = m->series_won < 0 ? 0 : m->series_won;
+    snprintf(m->series_line, sizeof(m->series_line), "RONDA %d DE %d GANADAS: %d",
+             round, best, won);
+}
 
 void DuelMenu_Init(DuelMenu *m) {
     memset(m, 0, sizeof(*m));
@@ -12,7 +40,12 @@ void DuelMenu_Init(DuelMenu *m) {
     m->options_from = DUEL_APP_MENU;
     m->sel = 0;
     m->hover = -1;
-    m->difficulty = DUEL_DIFF_PILOT;
+    m->difficulty = DUEL_DIFF_ROOKIE; /* M9: EASY by default (user order) */
+    m->skirmish = DUEL_SKIRMISH_DEFAULT; /* M10: 3v3 keeps M5/M9 battle */
+    m->series_best = 3; /* M19 rounds default */
+    m->series_round = 0;
+    m->series_won = 0;
+    duel_refresh_series(m);
     m->vol_master = 0.8f;
     m->vol_music = 0.65f;
     m->vol_sfx = 1.0f;
@@ -21,6 +54,7 @@ void DuelMenu_Init(DuelMenu *m) {
     m->pilot_idx = -1;
     DuelPilot_Defaults(&m->pilot, "");
     DuelMenu_RefreshPilots(m);
+    duel_refresh_brief(m);
 }
 
 void DuelMenu_RefreshPilots(DuelMenu *m) {
@@ -51,6 +85,8 @@ void DuelMenu_SetState(DuelMenu *m, DuelAppState s) {
     m->state = s;
     m->sel = 0;
     m->hover = -1;
+    duel_refresh_brief(m); /* M10: brief lines track battle size */
+    duel_refresh_series(m); /* M19: series line tracks round/won/best */
     /* Land selection on the first selectable row. */
     {
         DuelMenuRow rows[DUEL_MENU_MAXROWS];
@@ -90,9 +126,11 @@ int DuelMenu_Rows(const DuelMenu *m, DuelMenuRow *out, int cap) {
         break;
     case DUEL_APP_BRIEF:
         ROW(DUEL_ROW_LABEL, m->dyn[2], DUEL_ACT_NONE);
-        ROW(DUEL_ROW_LABEL, "X-WING VS 3 TIE", DUEL_ACT_NONE);
-        ROW(DUEL_ROW_LABEL, "ALIADOS: 2 X-WING", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_LABEL, m->dyn[4], DUEL_ACT_NONE);
+        ROW(DUEL_ROW_LABEL, m->dyn[5], DUEL_ACT_NONE);
         ROW(DUEL_ROW_CHOICE, "DIFICULTAD", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "BATALLA", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "RONDAS", DUEL_ACT_NONE);
         ROW(DUEL_ROW_ACTION, "INICIAR", DUEL_ACT_START);
         ROW(DUEL_ROW_ACTION, "VOLVER", DUEL_ACT_BACK);
         break;
@@ -117,11 +155,13 @@ int DuelMenu_Rows(const DuelMenu *m, DuelMenuRow *out, int cap) {
     case DUEL_APP_PAUSED:
         ROW(DUEL_ROW_ACTION, "REANUDAR", DUEL_ACT_RESUME);
         ROW(DUEL_ROW_ACTION, "REINICIAR", DUEL_ACT_RESTART);
+        ROW(DUEL_ROW_ACTION, "RECENTRAR", DUEL_ACT_RECENTER);
         ROW(DUEL_ROW_ACTION, "OPCIONES", DUEL_ACT_ENTER_OPTIONS);
         ROW(DUEL_ROW_ACTION, "MENU", DUEL_ACT_QUIT_TO_MENU);
         break;
     case DUEL_APP_RESULT:
         ROW(DUEL_ROW_LABEL, m->dyn[3], DUEL_ACT_NONE);
+        ROW(DUEL_ROW_LABEL, m->series_line, DUEL_ACT_NONE);
         ROW(DUEL_ROW_ACTION, "REPETIR", DUEL_ACT_REPEAT);
         ROW(DUEL_ROW_ACTION, "MENU", DUEL_ACT_QUIT_TO_MENU);
         break;
@@ -208,7 +248,8 @@ DuelMenuAction DuelMenu_ActivateRow(DuelMenu *m, int row) {
     if (row < 0 || row >= n) return DUEL_ACT_NONE;
     if (rows[row].kind == DUEL_ROW_LABEL) return DUEL_ACT_NONE;
     if (rows[row].kind == DUEL_ROW_CHOICE) {
-        /* Click cycles forward (same as Adjust +1). */
+        /* Click cycles forward (same as Adjust +1) on THIS row. */
+        m->sel = row;
         DuelMenu_Adjust(m, 1);
         return DUEL_ACT_NONE;
     }
@@ -220,8 +261,13 @@ DuelMenuAction DuelMenu_ActivateRow(DuelMenu *m, int row) {
     return (DuelMenuAction)rows[row].id;
 }
 
+int DuelMenu_Highlighted(const DuelMenu *m) {
+    if (!m) return -1;
+    return m->hover >= 0 ? m->hover : m->sel;
+}
+
 DuelMenuAction DuelMenu_Activate(DuelMenu *m) {
-    return DuelMenu_ActivateRow(m, m->sel);
+    return DuelMenu_ActivateRow(m, DuelMenu_Highlighted(m));
 }
 
 static float duel_clamp01(float v) {
@@ -236,6 +282,26 @@ void DuelMenu_Adjust(DuelMenu *m, int dir) {
     float step = (dir > 0) ? 1.0f : -1.0f;
     if (m->sel < 0 || m->sel >= n) return;
     if (rows[m->sel].kind == DUEL_ROW_CHOICE) {
+        /* M10: choice rows cycle by label (DIFICULTAD + BATALLA + RONDAS). */
+        if (!strcmp(rows[m->sel].label, "RONDAS")) {
+            if (dir > 0)
+                m->series_best = m->series_best >= 5 ? 1 :
+                    (m->series_best >= 3 ? 5 : 3);
+            else
+                m->series_best = m->series_best <= 1 ? 5 :
+                    (m->series_best <= 3 ? 1 : 3);
+            duel_refresh_series(m);
+            return;
+        }
+        if (!strcmp(rows[m->sel].label, "BATALLA")) {
+            m->skirmish += (dir > 0) ? 1 : -1;
+            if (m->skirmish < DUEL_SKIRMISH_MIN)
+                m->skirmish = DUEL_SKIRMISH_MAX;
+            if (m->skirmish > DUEL_SKIRMISH_MAX)
+                m->skirmish = DUEL_SKIRMISH_MIN;
+            duel_refresh_brief(m);
+            return;
+        }
         m->difficulty += (dir > 0) ? 1 : -1;
         if (m->difficulty < DUEL_DIFF_ROOKIE) m->difficulty = DUEL_DIFF_ACE;
         if (m->difficulty > DUEL_DIFF_ACE) m->difficulty = DUEL_DIFF_ROOKIE;
@@ -290,7 +356,20 @@ void DuelMenu_RowValue(const DuelMenu *m, int row, char *out, int cap) {
         snprintf(out, (size_t)cap, "%s",
                  (m->pilot_idx >= 0 && m->pilot.name[0]) ? m->pilot.name : "-");
     } else if (rows[row].kind == DUEL_ROW_CHOICE) {
-        snprintf(out, (size_t)cap, "%s", kDiffName[m->difficulty]);
+        /* M19: RONDAS shows the series length. */
+        if (!strcmp(rows[row].label, "RONDAS")) {
+            int b = (m->series_best == 1 || m->series_best == 5) ?
+                m->series_best : 3;
+            snprintf(out, (size_t)cap, "%d", b);
+        /* M10: BATALLA shows 1V1..5V5. */
+        } else if (!strcmp(rows[row].label, "BATALLA")) {
+            int w = m->skirmish;
+            if (w < DUEL_SKIRMISH_MIN || w > DUEL_SKIRMISH_MAX)
+                w = DUEL_SKIRMISH_DEFAULT;
+            snprintf(out, (size_t)cap, "%dV%d", w, w);
+        } else {
+            snprintf(out, (size_t)cap, "%s", kDiffName[m->difficulty]);
+        }
     } else if (rows[row].kind == DUEL_ROW_SLIDER) {
         float v = 0.0f;
         if (!strcmp(rows[row].label, "VOLUMEN")) v = m->vol_master;

@@ -55,15 +55,23 @@ int DuelRender_HandLever(const DuelRender *r, float *ld);
 /* M7: hand-lever sensitivity (clamped 0.5..1.5, default 1.0). */
 void DuelRender_SetHandSens(DuelRender *r, float sens);
 /* M7 menu panel + interaction (main-owned DuelMenu, see duel_menu.h).
- * center/quat are a LOCAL-space anchor (head frame); the eye pass brings
- * them to game space through the exact eye/hand path. */
+ * center/quat are a LOCAL-space anchor (M11: home-derived, cockpit-fixed;
+ * pre-cal head fallback); the eye pass brings them to game space through
+ * the exact eye/hand path. */
 #include "duel_menu.h"
 void DuelRender_SetMenuPanel(DuelRender *r, int show, const DuelMenu *m,
                              DuelVec3 center, DuelQuat quat);
+/* M11: canonical near-panel placement (0.5 m, cockpit-fixed when the
+ * seat cal is valid; live head pose fallback pre-cal). hpos/hquat are
+ * the LOCAL mid-eye pose (fallback only). */
+void DuelRender_PlaceMenuHome(DuelRender *r, const DuelMenu *m,
+                              DuelVec3 hpos, DuelQuat hquat);
 void DuelRender_SetCombatHud(DuelRender *r, int show);
 void DuelRender_ClearGrabs(DuelRender *r);
 void DuelRender_RequestRecenter(DuelRender *r);
 int DuelRender_MenuPointer(const DuelRender *r, int *row, float *x, float *y);
+/* M19: cockpit pause-button press edge (1 once per press, consumed). */
+int DuelRender_PauseButton(DuelRender *r);
 
 /* M3.4: 1 while the right index trigger is pulled, else 0. */
 int DuelRender_HandFire(const DuelRender *r);

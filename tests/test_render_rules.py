@@ -319,8 +319,8 @@ def main():
     check("star decimation 1/3",
           "#define DUEL_STAR_DRAW_DIV 3" in text
           and "if (i % DUEL_STAR_DRAW_DIV != 0) continue;" in text)
-    check("POV back 10cm, up 5cm (M3.0b)",
-          "DUEL_SEAT_POS = { 0.0f, 0.75f, -0.88f };" in text)
+    check("POV back 10cm (M4g)",
+          "DUEL_SEAT_POS = { 0.0f, 0.75f, -0.78f };" in text)
     check("near particles 78, mid 29",
           "#define DUEL_DEPTH_NEAR_CAP 78" in depth_text
           and "#define DUEL_DEPTH_MID_CAP 29" in depth_text)
@@ -504,7 +504,8 @@ def main():
           and "DUEL_TIE_TURN_RATE      0.75f" in cfg_text
           and "DUEL_TIE_EVADE_DIST     80.0f" in cfg_text
           and "DUEL_TIE_EVADE_TIME" in sim_text
-          and "t->throttle = 0.70f" in sim_text)
+          # M9: attack throttle is rookie-gated; the 0.70 baseline is pinned.
+          and "t->throttle = (s->diff <= 0) ? 0.85f : 0.70f;" in sim_text)
     # 37. M3.8c: positioned stick latch + fair-kill bundle.
     check("stick latch 9cm, positioned only",
           "#define DUEL_GRAB_STICK_LATCH_R 0.09f" in hands_hdr
@@ -525,8 +526,11 @@ def main():
     # 38. M5 skirmish: 3 ties vs player + 2 allies, team-only damage.
     sim_hdr = (SRC.parent / "duel_sim.h").read_text(encoding="utf-8")
     check("M5 counts",
-          "#define DUEL_TIE_COUNT 3" in sim_hdr
-          and "#define DUEL_ALLY_COUNT 2" in sim_hdr)
+          "#define DUEL_TIE_COUNT 5" in sim_hdr
+          and "#define DUEL_ALLY_COUNT 4" in sim_hdr
+          and "#define DUEL_SKIRMISH_MIN 1" in sim_hdr
+          and "#define DUEL_SKIRMISH_MAX 5" in sim_hdr
+          and "#define DUEL_SKIRMISH_DEFAULT 3" in sim_hdr)
     check("M5 team damage (rebel bolts hit ties only)",
           "DUEL_SHIP_ALLY" in sim_text
           and "the player's shots can never hurt friendlies" in sim_text)
@@ -556,7 +560,8 @@ def main():
           and "duel_cal_neutralize(&r->cal, r->menu_center, r->menu_quat" in text
           and "duel_eye_pose_motion(s->player.orient, s->player.pos, DUEL_SEAT_POS," in text
           and "duel_q_right(menu_q)" in text
-          and "duel_v3_sub(hit, menu_c)" in text
+          # M10: touch measures the fingertip against the converted anchor.
+          and "rel = duel_v3_sub(tip, menu_c);" in text
           and "duel_q_right(r->menu_quat)" not in text)
     check("M7 menu ranges are drawn (emit => draw)",
           "SDL_DrawGPUPrimitives(rp, (Uint32)menu_tri_range.count, 1, (Uint32)menu_tri_range.first, 0);" in text
@@ -582,6 +587,228 @@ def main():
     check("M7 pilot baseline difficulty survives reset",
           "s->diff = 1; /* M7: pilot = frozen baseline" in sim_text
           and "int df = s->diff;" in sim_text)
+    # 41. M9 stability + easy: highlight activation, throttled prefs saves,
+    #     boot panel re-place, rookie-only AI envelope.
+    menu_text = (SRC.parent / "duel_menu.c").read_text(encoding="utf-8")
+    check("M9 activation follows the visible highlight",
+          "int DuelMenu_Highlighted(const DuelMenu *m)" in menu_text
+          and "m->hover >= 0 ? m->hover : m->sel" in menu_text
+          and "click_row = DuelMenu_Highlighted(&menu)" in main_text)
+    check("M9 sticks take over from stale hand hover",
+          "menu.sel = menu.hover;" in main_text
+          and "menu.hover = -1;" in main_text)
+    check("M9 prefs saves throttled + flushed on transition",
+          "prefs_dirty = 1;" in main_text
+          and "save_now - last_save_us >= 500000u" in main_text
+          and "menu_act != DUEL_ACT_NONE" in main_text)
+    check("M9 boot panel re-placed when seat-cal lands",
+          "panel_cal_gen == 0 && gen_now > 0" in main_text
+          and "DUEL menu re-place" in main_text)
+    check("M9 easy default (menu + new pilot)",
+          "m->difficulty = DUEL_DIFF_ROOKIE" in menu_text
+          and "p->last_diff = 0;" in
+          (SRC.parent / "duel_profile.c").read_text(encoding="utf-8"))
+    check("M9 easy AI envelope is rookie-only",
+          "evade_dist = easy ? 130.0f : DUEL_TIE_EVADE_DIST" in sim_text
+          and "fire_dot = easy ? 0.980f : DUEL_TIE_FIRE_CONE_DOT" in sim_text
+          and "fire_range = easy ? 500.0f : DUEL_TIE_FIRE_RANGE" in sim_text
+          and "int easy = (s->diff <= 0);" in sim_text)
+    check("M9 easy crossing reacquire + exits",
+          "M9 easy: fly a crossing pass" in sim_text
+          and "s->ai_t[idx] > 6.0f" in sim_text)
+    # 42. M10 home view + touch + battle sizes.
+    audio_text = (SRC.parent / "duel_audio_core.c").read_text(encoding="utf-8")
+    hands_text = (SRC.parent / "duel_hands.c").read_text(encoding="utf-8")
+    check("M10 death reset restores the home view",
+          "duel_cal_home_restore(&r->cal)" in text
+          and "reason=HOME-RESTORE" in text
+          and "duel_cal_home_store(&r->cal)" in text
+          and "static inline void duel_cal_home_restore(DuelSeatCal *cal)"
+          in math_text
+          and "cal->reason = DUEL_CAL_RESET;" in math_text)
+    check("M10 menus use panel touch, not pinch",
+          "DuelTouch_Level(&r->menu_press[sd]" in text
+          and "return r->menu_touch;" in text
+          and '"TOCA LA PANTALLA / GATILLO"' in text
+          and "r->menu_pinch" not in text
+          and "void DuelTouch_Level(int *pressed" in hands_text)
+    check("M10 touch clicks the row touched now",
+          "menu.hover = hov;" in main_text
+          and "prev_press = press;" in main_text)
+    check("M10 battle size applied before combat reset",
+          "Duel_SetSkirmish(&sim, menu.skirmish);" in main_text
+          and main_text.find("Duel_SetSkirmish(&sim, menu.skirmish);") <
+          main_text.find("Duel_ResetCombat(&sim);")
+          and '"BATALLA"' in menu_text
+          and "Duel_TiesWanted(s)" in sim_text
+          and "Duel_TiesAlive(s) == Duel_TiesWanted(s)" in text)
+    check("M10 paused screen offers recenter",
+          menu_text.count('"RECENTRAR", DUEL_ACT_RECENTER') >= 2)
+    check("M10 audio first poll snapshots silently",
+          "if (!st->synced) {" in audio_text
+          and "st->last_alive_t[k] = s->ties[k].alive;" in audio_text)
+    # 43. M11 near home panel + winner-hand touch arbitration.
+    menu_hdr = (SRC.parent / "duel_menu.h").read_text(encoding="utf-8")
+    check("M11 canonical home placement at 0.5 m",
+          "DuelRender_PlaceMenuHome(render, &menu, hpos, hq)" in main_text
+          and "duel_home_anchor(&r->cal" in text
+          and "duel_v3(0, 0, -DUEL_MENU_DIST)" in text
+          and "#define DUEL_MENU_DIST 0.5f" in menu_hdr
+          and "static inline void duel_home_anchor(" in math_text)
+    check("M11 winner hand owns hover+press",
+          "r->menu_touch = r->menu_press[win] ? 1 : 0;" in text
+          and "cand_row[sd] >= 0" in text)
+    # 44. M12 ghost-explosion gate (no stuck fullscreen flash).
+    check("M12 explosion triggers gated on seen-alive",
+          "duel_fx_boom(&r->seen_player, s->player.alive" in text
+          and "duel_fx_boom(&r->seen_tie[k], s->ties[k].alive" in text
+          and "duel_fx_boom(&r->seen_ally[k], s->allies[k].alive" in text
+          and "r->seen_tie[k] = s->ties[k].alive ? 1 : 0;" in text
+          and "static inline int duel_fx_boom(" in math_text)
+    check("M12 placement branch logged",
+          '"DUEL menu placed home dist=%.2f"' in text
+          and '"DUEL menu placed head dist=%.2f"' in text)
+    # 45. M13 no visible pilot body (M4 removed per user request: menu
+    # pilot profiles stay, the skinned body module is gone).
+    check("M13 touch UI has no finger rays",
+          "menu_ray" not in text)
+    check("M13 no pilot body in render",
+          "pilot_load" not in text
+          and "draw_pilot" not in text
+          and "skin_arms" not in text
+          and "pilot_mesh_wanted" not in text
+          and "pilot_bake_prim" not in text
+          and "DuelPilotJoint" not in text
+          and "PilotSkin" not in text
+          and "PilotArm" not in text
+          and "duel_pilot.h" not in text
+          and "DuelHands_Local2Ship" not in text
+          and not (SRC.parent / "duel_pilot.c").exists()
+          and not (SRC.parent / "duel_pilot.h").exists())
+    check("M13 no pilot-body tests in suite",
+          "test_pilot_pose" not in test_text
+          and "test_pilot_boot" not in test_text
+          and "test_pilot_arm" not in test_text
+          and "test_local2ship" not in test_text
+          and "test_pilot_roundtrip" in test_text
+          and "test_pilot_scan" in test_text)
+    # 46. M14 menu/hands depth (user report: hands render behind the menu).
+    # The panel used the depth-off HUD pipes drawn after the hands, so it
+    # always overdrew the fingers even when touching. Now the menu has its
+    # own depth-tested pipes and draws before the hands: fingers in front
+    # win, hands behind the panel stay hidden.
+    check("M14 menu pipes depth-tested (tris write, lines test)",
+          "r->pipe_menu_tri = make_pipeline(r, r->unlit_vs, r->unlit_fs, "
+          "SDL_GPU_PRIMITIVETYPE_TRIANGLELIST," in text
+          and "r->pipe_menu_line = make_pipeline(r, r->unlit_vs, r->unlit_fs, "
+          "SDL_GPU_PRIMITIVETYPE_LINELIST," in text
+          and "SDL_BindGPUGraphicsPipeline(rp, r->pipe_menu_tri);" in text
+          and "SDL_BindGPUGraphicsPipeline(rp, r->pipe_menu_line);" in text)
+    check("M14 menu drawn before hands (front fingers win)",
+          text.find("(Uint32)menu_tri_range.count, 1") <
+          text.find("(Uint32)hbone_range.count, 1")
+          and text.find("(Uint32)menu_line_range.count, 1") <
+          text.find("(Uint32)r->hand_ni[hside], 1"))
+    check("M14 HUD keeps the depth-off pipe (unchanged)",
+          "r->pipe_tri_alpha = make_pipeline(r, r->unlit_vs, r->unlit_fs, "
+          "SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,\n"
+          "                                      0, 0, 0, 1, 0" in text)
+    # 47. M15 grabbable menu (user report: M14 depth lets the cockpit cover
+    # part of the panel). Pinch near the panel grabs it, the drag moves the
+    # LOCAL anchor through the inverse eye path (cockpit-fixed), drop
+    # re-faces the user, the spot survives screen changes until RECENTRAR.
+    check("M15 panel grab is pinch near panel",
+          "DuelPanelGrab_Update(&r->menu_pg[sd]" in text
+          and "h->j[5].pos_valid && h->j[10].pos_valid" in text)
+    # M17 supersedes the delta follow with a rigid tablet follow
+    # (absolute place); the anchor still moves through the inverse path.
+    check("M15 drag moves LOCAL anchor via inverse path",
+          "duel_panel_place" in text
+          and "r->menu_center = duel_panel_clamp" in text)
+    check("M15 dragged panel kept across screens",
+          "if (r->menu_moved)" in text
+          and "DUEL menu kept dragged" in text)
+    check("M15 grab suppresses click, recenter re-homes (M17: drop keeps pose)",
+          "!r->menu_pg[sd].held" in text
+          and "DUEL menu drop" in text
+          and "r->menu_moved = 0" in text)
+    # 48. M16 small panel + grab handle + opaque paint (user report: hard
+    # to know where to grab; panel too big; noise in the colors). One
+    # scale knob over the M11 design values, an amber handle strip with
+    # explicit text above the rows, and alpha 1.0 paint (the 0.90-0.93
+    # translucency bled the cockpit through = the color noise).
+    # M19: user ordered 40% smaller still (x0.6 of M16).
+    check("M16/M19 menu scale x0.42 over M11 design values",
+          "#define DUEL_MENU_SCALE 0.42f" in menu_hdr
+          and "(0.773f * DUEL_MENU_SCALE)" in menu_hdr
+          and "#define DUEL_MENU_DIST 0.5f" in menu_hdr)
+    # M18 supersedes the top strip (user order: sides only, no top /
+    # bottom / corners): grip ticks on both side borders instead.
+    check("M16/M18 grip affordance on the sides",
+          "duel_menu_seg(" in text
+          and "AGARRA PARA MOVER" not in text
+          and "DUEL_MENU_HANDLE_H" not in text)
+    check("M16 panel paint opaque (no bleed-through)",
+          "0.015f, 0.020f, 0.045f, 1.0f" in text
+          and "0.05f, 0.07f, 0.12f, 1.0f" in text
+          and "0.10f, 0.32f, 0.42f, 1.0f" in text)
+    # 49. M17 tablet follow (user report: the M15 grab box latched from
+    # empty space below; want to grab the frame and have the panel move
+    # WITH the hand, wrist rotation included). Latch only on the frame
+    # (all edges + handle strip); while held the panel is rigidly pinned
+    # to the hand (absolute place, no drift); drop keeps the hand pose.
+    check("M17/M18 grab latches on the sides only",
+          "near = duel_panel_frame(DUEL_MENU_PANEL_W, ph,\n"
+          "                            mlx, mly, mdist);" in text)
+    check("M17 held panel rigidly follows the hand",
+          "duel_panel_place(" in text
+          and "r->menu_pghand[sd]" in text
+          and "h->j[1].rot_valid" in text)
+    check("M17 drop keeps the hand orientation",
+          "DUEL menu drop" in text
+          and "duel_q_from_to" not in text)
+    # 50. M18 depth-layered paint (user report: moving diagonal lines in
+    # the colors). Since M14 the bg/rows/slider ride exactly coplanar
+    # with depth write on: 1-ulp interpolation differences make
+    # overlapping triangles flicker with the viewpoint (diagonals = quad
+    # triangulation). Fix: stack layers in mm (bg 2, rows/borders 3,
+    # slider track 3.5 / fill 4, glyphs 5); invisible parallax, no fight.
+    check("M18 menu paint depth-layered (rows/slider above bg)",
+          "duel_v3_scale(pn, 0.001f)" in text
+          and "duel_v3_scale(pn, 0.0015f)" in text
+          and "duel_v3_scale(pn, 0.002f)" in text
+          and "&dw, ccr, pax, pay" in text)
+    check("M18 glyphs float on the top layer",
+          "-0.005f" in text)
+    # 51. M19 rounds + cockpit pause button (user order: 40% smaller
+    # menu, round count in the menu, pause button on the ship's right
+    # side that pauses and brings the menu back). BRIEF gains a RONDAS
+    # choice (1/3/5, default 3); RESULT shows the series line; a touch
+    # button on the right console pauses from combat.
+    check("M19 rounds choice + series line",
+          '"RONDAS"' in menu_text
+          and "series_best" in menu_hdr
+          and "series_line" in menu_hdr
+          and '"RONDA %d DE %d GANADAS: %d"' in menu_text)
+    # M21: the floating box is gone (user never saw it; the touch
+    # snapped to a REAL red button on the right panel). Only the state-
+    # colored PAUSA label floats; the cockpit button is the visual.
+    # M24: the user photo settles it (M23 mesh40p1 was the CENTER pair,
+    # a miss): the A-like button of the tilted RIGHT pair by the window
+    # (Tex16 V-cell quad on mesh02p4, barycentric). Mate C 4.6 cm away.
+    # M26 label glyphs are 3.2 mm (60% smaller than M24's 8 mm;
+    # M25's 2.4 mm overshot, M23's 1.6 mm was subpixel at 0.5 m).
+    check("M19/M26 pause on the photo A button",
+          "DUEL_PAUSEBTN_SHIP" in text
+          and '"PAUSA"' in text
+          and "btn_line_range" in text
+          and "btn_range" not in text
+          and "int DuelRender_PauseButton(DuelRender *r)" in text
+          and "0.3590f, 0.4713f, -1.1595f" in hands_text
+          and '"PAUSA", 0.0f, -0.013f, 0.0032f' in text)
+    check("M19 main pauses on cockpit button",
+          "DuelRender_PauseButton(render)" in main_text
+          and '"pause button"' in main_text)
 
     if FAILURES:
         print(f"{len(FAILURES)} FAILURES")

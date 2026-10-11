@@ -69,6 +69,7 @@ typedef struct DuelAudioState {
     int last_muzzle_p, last_muzzle_t[DUEL_TIE_COUNT], last_muzzle_a[DUEL_ALLY_COUNT];
     float last_hp_p, last_hp_t[DUEL_TIE_COUNT], last_hp_a[DUEL_ALLY_COUNT];
     int last_alive_p, last_alive_t[DUEL_TIE_COUNT], last_alive_a[DUEL_ALLY_COUNT];
+    int synced; /* M10: first poll snapshots silently (parked ships mute) */
     float warn_cd;
     int ready; /* set once sounds are loaded */
     /* M7 menu volumes (init = the frozen #define mix). */
