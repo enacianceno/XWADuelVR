@@ -3479,6 +3479,80 @@ static void test_pausebtn(void) {
     printf("pausebtn ok\n");
 }
 
+static void test_duel_pvp(void) {
+    /* MP-A: PvP duel with two humans. Face-to-face spawn, independent
+     * inputs, cross kills, latched winner, skirmish isolation. */
+    DuelState s;
+    DuelInput in1, in2;
+    int i;
+    memset(&in1, 0, sizeof(in1));
+    memset(&in2, 0, sizeof(in2));
+    Duel_Init(&s);
+    Duel_ResetDuel(&s);
+    EXPECT(s.duel_mode == 1);
+    EXPECT(s.duel_winner == 0);
+    EXPECT(s.phase == DUEL_PHASE_COMBAT);
+    EXPECT(s.player.alive && s.peer.alive);
+    EXPECT_NEAR(s.player.pos.x, 0.0f, 1e-4f);
+    EXPECT_NEAR(s.peer.pos.z, -1000.0f, 1e-2f);
+    {
+        DuelVec3 pf = duel_q_forward(s.peer.orient);
+        EXPECT(pf.z > 0.99f); /* peer nose toward the player */
+    }
+    EXPECT(Duel_TiesAlive(&s) == 0 && Duel_AlliesAlive(&s) == 0);
+    /* P2 input moves/turns only the peer. */
+    in2.thr_axis = 1.0f;
+    in2.pitch = 1.0f;
+    for (i = 0; i < 60; i++)
+        Duel_UpdateDuel(&s, &in1, &in2, 1.0f / 60.0f);
+    EXPECT(s.peer.speed > s.player.speed + 1.0f);
+    EXPECT(s.peer.pos.z > -1000.0f);
+    {
+        DuelVec3 qf = duel_q_forward(s.player.orient);
+        EXPECT(qf.z < -0.999f); /* player never turned */
+        EXPECT(duel_q_forward(s.peer.orient).z < 0.99f); /* peer did */
+    }
+    /* P1 point-blank kill -> winner 1, phase latched. Park both ships
+     * on the firing axis first (the peer is still fast from above). */
+    s.peer.pos = duel_v3(0.0f, 0.0f, -60.0f);
+    s.peer.orient = duel_q_identity();
+    s.peer.speed = 0.0f;
+    s.peer.throttle = 0.0f;
+    s.player.pos = duel_v3(0.0f, 0.0f, 0.0f);
+    s.player.orient = duel_q_identity();
+    s.player.speed = 0.0f;
+    s.player.throttle = 0.0f;
+    memset(&in1, 0, sizeof(in1));
+    memset(&in2, 0, sizeof(in2));
+    in1.fire = 1;
+    for (i = 0; i < 1200 && s.peer.alive; i++)
+        Duel_UpdateDuel(&s, &in1, &in2, 1.0f / 60.0f);
+    EXPECT(!s.peer.alive);
+    EXPECT(s.player.alive);
+    EXPECT(s.phase == DUEL_PHASE_DESTROYED);
+    EXPECT(s.duel_winner == 1);
+    /* No auto-reset past DUEL_RESET_DELAY: winner stays. */
+    for (i = 0; i < 300; i++)
+        Duel_UpdateDuel(&s, &in1, &in2, 1.0f / 60.0f);
+    EXPECT(s.phase == DUEL_PHASE_DESTROYED && s.duel_winner == 1);
+    /* Peer revenge -> winner 2. */
+    Duel_ResetDuel(&s);
+    s.peer.pos = duel_v3(0.0f, 0.0f, 60.0f);
+    s.peer.orient = duel_q_identity();
+    memset(&in1, 0, sizeof(in1));
+    memset(&in2, 0, sizeof(in2));
+    in2.fire = 1;
+    for (i = 0; i < 1200 && s.player.alive; i++)
+        Duel_UpdateDuel(&s, &in1, &in2, 1.0f / 60.0f);
+    EXPECT(!s.player.alive && s.peer.alive);
+    EXPECT(s.duel_winner == 2);
+    /* Skirmish reset parks the peer again. */
+    Duel_ResetCombat(&s);
+    EXPECT(s.duel_mode == 0 && !s.peer.alive && s.duel_winner == 0);
+    EXPECT(Duel_TiesAlive(&s) == Duel_TiesWanted(&s));
+    printf("duel_pvp ok\n");
+}
+
 int main(void) {
     test_quat();
     test_flight();
@@ -3591,6 +3665,7 @@ int main(void) {
     test_panel_drag();
     test_panel_follow();
     test_pausebtn();
+    test_duel_pvp();
     if (fails == 0) printf("ALL DUEL TESTS PASS\n");
     else printf("%d FAILURES\n", fails);
     return fails == 0 ? 0 : 1;

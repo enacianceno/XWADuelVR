@@ -282,6 +282,7 @@ int Duel_HeadGuide(DuelQuat head_q, DuelVec3 eye_pos, DuelVec3 target_pos,
 
 static int duel_fire(DuelState *s, DuelShipKind owner, int idx) {
     DuelShip *sh = owner == DUEL_SHIP_PLAYER ? &s->player
+        : owner == DUEL_SHIP_PEER ? &s->peer
         : owner == DUEL_SHIP_TIE ? &s->ties[idx] : &s->allies[idx];
     if (!sh->alive || sh->fire_cd > 0.0f) return 0;
     for (int i = 0; i < DUEL_LASER_POOL; i++) {
@@ -289,34 +290,37 @@ static int duel_fire(DuelState *s, DuelShipKind owner, int idx) {
         DuelLaser *l = &s->lasers[i];
         l->active = 1;
         l->owner = owner;
-        float spd = owner == DUEL_SHIP_PLAYER ? DUEL_PLAYER_LASER_SPEED
-            : owner == DUEL_SHIP_TIE ? DUEL_TIE_LASER_SPEED
-                                     : DUEL_PLAYER_LASER_SPEED;
+        float spd = owner == DUEL_SHIP_TIE ? DUEL_TIE_LASER_SPEED
+                                           : DUEL_PLAYER_LASER_SPEED;
         DuelVec3 fwd = duel_q_forward(sh->orient);
         l->pos = Duel_MuzzleWorldAt(sh, owner, sh->muzzle);
         sh->muzzle++;
         l->vel = duel_v3_scale(fwd, spd + sh->speed);
         l->life = DUEL_LASER_LIFETIME;
-        { /* M7: difficulty scales the TIE refire rate (player/allies fixed). */
+        { /* M7: difficulty scales the TIE refire rate (humans/allies fixed).
+           * MP-A: the peer fires the player gun (X-Wing set). */
             float dhp, dsp, dtn, dcd;
             duel_diff_mults(s->diff, &dhp, &dsp, &dtn, &dcd);
-            sh->fire_cd = owner == DUEL_SHIP_PLAYER ? DUEL_PLAYER_LASER_COOLDOWN
-                : owner == DUEL_SHIP_TIE ? DUEL_TIE_LASER_COOLDOWN * dcd
-                                         : DUEL_ALLY_LASER_COOLDOWN;
+            sh->fire_cd = owner == DUEL_SHIP_TIE ? DUEL_TIE_LASER_COOLDOWN * dcd
+                : owner == DUEL_SHIP_ALLY ? DUEL_ALLY_LASER_COOLDOWN
+                                          : DUEL_PLAYER_LASER_COOLDOWN;
         }
         return 1;
     }
     return 0;
 }
 
-static void duel_update_player(DuelState *s, const DuelInput *in, float dt) {
-    DuelShip *p = &s->player;
+/* MP-A: shared human flight integrator. The local player (use_hands)
+ * keeps the hand-lever overrides; the duel peer flies the same ship
+ * on raw input only (its hands live on the other visor). */
+static void duel_update_human(DuelState *s, DuelShip *p, const DuelInput *in,
+                              DuelShipKind kind, int use_hands, float dt) {
     if (!p->alive) return;
     if (p->fire_cd > 0.0f) p->fire_cd -= dt;
     /* Throttle: M3.2 hand lever owns it absolutely while held; otherwise
      * the lever integrates (M8: right-stick-Y lever). The integrator
      * resumes from the hand-set value: release never jumps. */
-    if (s->hand_thr_active) {
+    if (use_hands && s->hand_thr_active) {
         p->throttle = duel_clampf(s->hand_thr_value, 0.0f, 1.0f);
     } else if (in->thr_axis > DUEL_DEADZONE || in->thr_axis < -DUEL_DEADZONE) {
         p->throttle = duel_clampf(p->throttle + in->thr_axis * DUEL_THROTTLE_RATE * dt, 0.0f, 1.0f);
@@ -339,11 +343,11 @@ static void duel_update_player(DuelState *s, const DuelInput *in, float dt) {
      * yaw (stick axes ignored while held); the left lever owns roll.
      * No bank coordination: yaw and roll are independent. Each hand
      * overrides only its own axes, so both levers work together. */
-    if (s->hand_stk_active) {
+    if (use_hands && s->hand_stk_active) {
         pitch = fabsf(s->hand_pitch) > s->hand_dead ? s->hand_pitch : 0.0f;
         yaw = fabsf(s->hand_yaw) > s->hand_dead ? s->hand_yaw : 0.0f;
     }
-    if (s->hand_lev_active) {
+    if (use_hands && s->hand_lev_active) {
         roll = fabsf(s->hand_lev_roll) > s->hand_dead ? s->hand_lev_roll : 0.0f;
     }
     DuelQuat qyaw = duel_q_axis_angle(duel_v3(0, 1, 0), -yaw * DUEL_PLAYER_YAW_RATE * dt);
@@ -352,7 +356,11 @@ static void duel_update_player(DuelState *s, const DuelInput *in, float dt) {
     DuelQuat dq = duel_q_mul(qyaw, duel_q_mul(qpitch, qroll));
     p->orient = duel_q_norm(duel_q_mul(p->orient, dq));
     p->pos = duel_v3_add(p->pos, duel_v3_scale(duel_q_forward(p->orient), p->speed * dt));
-    if (in->fire) duel_fire(s, DUEL_SHIP_PLAYER, 0);
+    if (in->fire) duel_fire(s, kind, 0);
+}
+
+static void duel_update_player(DuelState *s, const DuelInput *in, float dt) {
+    duel_update_human(s, &s->player, in, DUEL_SHIP_PLAYER, 1, dt);
 }
 
 /* M5: nearest living rebel (player + allies) to a position. Ties split
@@ -613,9 +621,13 @@ static void duel_update_lasers(DuelState *s, float dt) {
         l->pos = duel_v3_add(l->pos, duel_v3_scale(l->vel, dt));
         /* M5 teams: rebel bolts (player + allies) test the ties only --
          * the player's shots can never hurt friendlies (user order) --
-         * and imperial bolts test the player + allies. */
-        if (l->owner == DUEL_SHIP_TIE) {
-            float dmg = DUEL_TIE_LASER_DAMAGE;
+         * and imperial bolts test the player + allies.
+         * MP-A: the peer flies imperial, so peer bolts join the TIE
+         * branch (player gun damage) and rebel bolts also test the
+         * peer (X-Wing radius). Parked peer in skirmish: no-op. */
+        if (l->owner == DUEL_SHIP_TIE || l->owner == DUEL_SHIP_PEER) {
+            float dmg = l->owner == DUEL_SHIP_TIE ? DUEL_TIE_LASER_DAMAGE
+                                                  : DUEL_PLAYER_LASER_DAMAGE;
             if (s->player.alive && duel_swept_hit(prev, l->pos, s->player.pos,
                     DUEL_PLAYER_RADIUS + DUEL_LASER_RADIUS)) {
                 l->active = 0;
@@ -642,6 +654,11 @@ static void duel_update_lasers(DuelState *s, float dt) {
                     duel_damage(&s->ties[k], dmg);
                     break;
                 }
+            }
+            if (l->active && s->peer.alive && duel_swept_hit(prev, l->pos,
+                    s->peer.pos, DUEL_PLAYER_RADIUS + DUEL_LASER_RADIUS)) {
+                l->active = 0;
+                duel_damage(&s->peer, dmg);
             }
         }
     }
@@ -677,5 +694,56 @@ void Duel_Update(DuelState *s, const DuelInput *in, float dt) {
         for (k = 0; k < DUEL_ALLY_COUNT; k++) duel_update_ally(s, k, dt);
         duel_update_lasers(s, dt);
         if (s->phase_t >= DUEL_RESET_DELAY) Duel_ResetCombat(s);
+    }
+}
+
+/* MP-A PvP duel: same combat reset, then the AI is parked dead and
+ * the peer spawns 1000 m ahead facing the player. Loser/winner and
+ * mode survive until the next Duel_ResetDuel. */
+void Duel_ResetDuel(DuelState *s) {
+    int i;
+    DuelVec3 pp;
+    Duel_ResetCombat(s);
+    s->duel_mode = 1;
+    s->duel_winner = 0;
+    for (i = 0; i < DUEL_TIE_COUNT; i++) {
+        s->ties[i].alive = 0;
+        s->ties[i].hp = 0.0f;
+    }
+    for (i = 0; i < DUEL_ALLY_COUNT; i++) {
+        s->allies[i].alive = 0;
+        s->allies[i].hp = 0.0f;
+    }
+    pp = duel_v3(0.0f, 0.0f, -DUEL_SPAWN_TIE_FWD);
+    duel_ship_reset(&s->peer, pp, duel_face_quat(pp, duel_v3(0, 0, 0)),
+                    DUEL_PLAYER_HP);
+}
+
+/* MP-A: two-human step. No AI, no auto-reset: on death the phase
+ * flips to DESTROYED and the winner latches (0 = double KO) until
+ * the menu calls Duel_ResetDuel for the next round. */
+void Duel_UpdateDuel(DuelState *s, const DuelInput *in1,
+                     const DuelInput *in2, float dt) {
+    if (dt <= 0.0f) return;
+    if (dt > 0.1f) dt = 0.1f; /* clamp tab-switch spikes */
+    s->time += dt;
+    s->phase_t += dt;
+    if (s->phase == DUEL_PHASE_COMBAT) {
+        duel_update_human(s, &s->player, in1, DUEL_SHIP_PLAYER, 1, dt);
+        duel_update_human(s, &s->peer, in2, DUEL_SHIP_PEER, 0, dt);
+        duel_update_lasers(s, dt);
+        if (!s->player.alive || !s->peer.alive) {
+            s->phase = DUEL_PHASE_DESTROYED;
+            s->phase_t = 0.0f;
+            if (!s->peer.alive && s->player.alive) s->duel_winner = 1;
+            else if (!s->player.alive && s->peer.alive) s->duel_winner = 2;
+            else s->duel_winner = 0;
+        }
+    } else {
+        DuelInput empty;
+        memset(&empty, 0, sizeof(empty));
+        duel_update_human(s, &s->player, &empty, DUEL_SHIP_PLAYER, 1, dt);
+        duel_update_human(s, &s->peer, &empty, DUEL_SHIP_PEER, 0, dt);
+        duel_update_lasers(s, dt);
     }
 }

@@ -416,17 +416,18 @@ def main():
     check("TIE keeps legacy single pass",
           "draw_model(r, NULL, cmd, rp, &r->tie, vp.m, tm.m, 0, 0, NULL)" in text)
     check("quadrant HOLDER owns throttle, stick integrates else",
-          "if (s->hand_thr_active)" in sim_text
+          "s->hand_thr_active" in sim_text
           and "r->grab_holder[DUEL_TGT_QUAD]" in text
           and "DuelQuad_ThrottleForMid(r->grab_mid[hq].z)" in text
-          and "if (hta) s->player.throttle" in sim_text)
+          and "if (hta) s->player.throttle" in sim_text
+          and "DUEL_SHIP_PLAYER, 1, dt)" in sim_text)
     check("M6 axis split: stick pitch+yaw, lever throttle+roll",
           "Duel_HandStick(&sim, sa, pd, rd)" in main_text
           and "DuelRender_HandStick(render, &pd, &rd)" in main_text
           and "Duel_HandLever(&sim, la, ld)" in main_text
           and "DuelRender_HandLever(render, &ld)" in main_text
-          and "if (s->hand_stk_active)" in sim_text
-          and "if (s->hand_lev_active)" in sim_text
+          and "s->hand_stk_active" in sim_text
+          and "s->hand_lev_active" in sim_text
           and "yaw = fabsf(s->hand_yaw)" in sim_text
           and "roll = fabsf(s->hand_lev_roll)" in sim_text)
     check("M6 no bank coordination",

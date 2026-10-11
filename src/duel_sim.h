@@ -6,8 +6,12 @@
 #include "duel_math.h"
 #include "flight_config.h"
 
+/* MP-A: DUEL_SHIP_PEER is the second human (PvP duel): flies the
+ * X-Wing set (muzzles/geometry/radius) but counts as imperial team
+ * for laser collisions, so the two humans can hit each other. */
 typedef enum DuelShipKind { DUEL_SHIP_PLAYER = 0, DUEL_SHIP_TIE = 1,
-                            DUEL_SHIP_ALLY = 2 } DuelShipKind;
+                            DUEL_SHIP_ALLY = 2, DUEL_SHIP_PEER = 3
+} DuelShipKind;
 
 /* M5 skirmish: up to 5 TIEs vs player + up to 4 X-wing allies.
  * Bolts only ever hit the ENEMY team (rebel bolts -> ties; imperial
@@ -67,6 +71,12 @@ typedef struct DuelState {
     DuelShip player;
     DuelShip ties[DUEL_TIE_COUNT];
     DuelShip allies[DUEL_ALLY_COUNT];
+    /* MP-A PvP duel: the peer (second human). Parked dead in skirmish.
+     * duel_mode 0 = vs AI, 1 = duel; duel_winner 0 none, 1 player,
+     * 2 peer (latched until Duel_ResetDuel; 0 also on double KO). */
+    DuelShip peer;
+    int duel_mode;
+    int duel_winner;
     DuelTieState ai[DUEL_TIE_COUNT];
     float ai_t[DUEL_TIE_COUNT]; /* time in current AI state */
     DuelVec3 evade_dir[DUEL_TIE_COUNT]; /* latched evade direction */
@@ -101,6 +111,11 @@ typedef struct DuelState {
 void Duel_Init(DuelState *s);
 void Duel_ResetCombat(DuelState *s);
 void Duel_Update(DuelState *s, const DuelInput *in, float dt);
+/* MP-A PvP duel: face-to-face spawn (AI parked dead) + two-human step.
+ * No auto-reset: the winner latches until Duel_ResetDuel. */
+void Duel_ResetDuel(DuelState *s);
+void Duel_UpdateDuel(DuelState *s, const DuelInput *in1,
+                     const DuelInput *in2, float dt);
 /* Main loop: publish the M3.1 grab lever state before Duel_Update. */
 void Duel_HandThrottle(DuelState *s, int active, float value);
 /* Main loop: publish the M3.3 stick deflection before Duel_Update. */
