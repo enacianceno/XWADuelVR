@@ -1,5 +1,7 @@
 # XWADuelVR
 
+## Video: XWADuelVR en el visor
+
 <video src="https://github.com/enacianceno/XWADuelVR/raw/master/docs/videos/duel-uat-gameplay.mp4" controls width="100%"></video>
 
 *Video de juego real capturado en el visor. Si no se reproduce aquí,
@@ -13,15 +15,6 @@ GPU/Vulkan, OpenXR). **No requiere streaming desde un PC.**
 
 > Proyecto experimental de fans, en pruebas de usuario (UAT).
 > Estado revisado el **11 de octubre de 2026**.
-
-![Menú Combat Simulation en el visor](docs/images/duel-menu.jpg)
-*Menú principal capturado en el visor: dificultad, batalla, rondas.*
-
-![Botón de pausa A en el cockpit](docs/images/duel-pause-button.jpg)
-*El par de botones rojos A/C junto a la ventana derecha; la A pausa.*
-
-![Acercamiento al par A/C](docs/images/duel-pause-closeup.jpg)
-*Acercamiento: botón A (izquierda, pausa) y botón C (derecha).*
 
 ## Estado actual (M26-TXT, `3.30-M26-txt`)
 
