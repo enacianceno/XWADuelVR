@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Plan de prueba UAT
+    url: https://github.com/enacianceno/XWADuelVR/blob/master/docs/UAT.md
+    about: Casos de prueba y cómo instalar la APK.
+  - name: Descargar APK (Releases)
+    url: https://github.com/enacianceno/XWADuelVR/releases
+    about: Última build disponible para testers.
