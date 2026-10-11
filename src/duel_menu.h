@@ -7,6 +7,7 @@
 #ifndef XWADUELVR_MENU_H
 #define XWADUELVR_MENU_H
 
+#include "duel_math.h"
 #include "duel_profile.h"
 
 typedef enum DuelAppState {
@@ -39,6 +40,7 @@ typedef enum DuelMenuAction {
     DUEL_ACT_QUIT_TO_MENU,
     DUEL_ACT_RECENTER,
     DUEL_ACT_REPEAT,     /* result -> combat again */
+    DUEL_ACT_CONTINUE,   /* M34 result-defeat -> respawn into the same battle */
     DUEL_ACT_ENTER_PILOTS,
     DUEL_ACT_SELECT_PILOT, /* row arg = pilot index */
     DUEL_ACT_NEW_PILOT,
@@ -67,11 +69,17 @@ typedef struct DuelMenu {
     int hover;                /* hand-ray row, -1 none (click target) */
     /* Live option values (main applies + persists via profile). */
     int difficulty;           /* DuelDifficulty */
-    int skirmish;             /* M10: battle size 1..5 ships per side */
-    int duel_mode;            /* MP-B1: 0 skirmish vs AI, 1 PvP duel */
+    int allies_n;             /* M31: wingmen 0..4 (default 2) */
+    int foes_n;               /* M31: enemies 0..5 (default 3) */
+    int duel_mode;            /* 0 skirmish vs AI, 1 PvP duel, 2 cruiser (M30) */
+    int craft_player;         /* M28: DuelCraft MI NAVE (default X-Wing) */
+    int craft_enemy;          /* M28: DuelCraft ENEMIGA (default TIE INT) */
     float vol_master, vol_music, vol_sfx; /* 0..1 */
     float sens;               /* 0.5..1.5, 1 = baseline */
     float dead;               /* 0.05..0.30, 0.15 = baseline */
+    int ray_on;               /* M35: controller ray selects in menus (default 1) */
+    int hand_left;            /* M36: 0 right-handed (right stick flies),
+                                 * 1 left-handed (sticks mirrored) */
     int result_win;           /* RESULT screen: 1 victory, 0 defeat */
     int result_kills;         /* player kills this combat */
     /* M19 series: best-of length (1/3/5, default 3), current round
@@ -122,6 +130,17 @@ float DuelMenu_PanelH(const DuelMenu *m);
 /* Selectable-row rect in panel-local coords (0/NULL when not found). */
 int DuelMenu_RowRect(const DuelMenu *m, int row,
                      float *x0, float *y0, float *x1, float *y1);
+/* M35 controller ray: intersect (ro + t*rd) with the panel plane
+ * (center c, right/up axes, user-side normal n); on a hit inside the
+ * panel write (lx, ly) and return the row, else -1. Pure/testable.
+ * M38: RayPlane splits the plane hit (lx, ly, t) from the row lookup
+ * so the beam can die exactly where the dot lands. */
+int DuelMenu_RayPlane(const DuelMenu *m, DuelVec3 ro, DuelVec3 rd,
+                       DuelVec3 c, DuelVec3 right, DuelVec3 up, DuelVec3 n,
+                       float *lx, float *ly, float *t);
+int DuelMenu_RayHit(const DuelMenu *m, DuelVec3 ro, DuelVec3 rd,
+                     DuelVec3 c, DuelVec3 right, DuelVec3 up, DuelVec3 n,
+                     float *lx, float *ly);
 /* Which selectable row contains a panel-local point (-1 = none). */
 int DuelMenu_HitRow(const DuelMenu *m, float x, float y);
 /* Controller nav: move selection (+1/-1), skipping labels. */

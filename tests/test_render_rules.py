@@ -79,11 +79,13 @@ def main():
     #    proof). M5: XwingExterior IS loaded, but ONLY as the ally mesh
     #    (drawn for allies[], never at the player pose).
     loads = sorted(set(m.group(1) for m in re.finditer(r'load_model\(r, &\S+, "(\w+)"\)', text)))
-    check("model loads are tie+cockpit+xwing-ally",
-          loads == ["TieFighter", "XwingCockpit", "XwingExterior"],
+    check("model loads are tie+cockpit+xwing-ally (M28: +tiein, M30: +isd)",
+          loads == ["StarDestroyer", "TieFighter", "TieInterceptor",
+                    "XwingCockpit", "XwingExterior"],
           f"loads {loads}")
     check("xwing exterior drawn for allies only, never the player",
-          "&r->xwing, vp.m, am.m" in text
+          "duel_craft_model(r, s->allies[k].craft)" in text
+          and "amod, vp.m, am.m" in text
           and "&r->xwing, vp.m, cm.m" not in text)
 
     # 8. The P0.2 head-glue root cause must stay dead: no matrix->quat
@@ -136,10 +138,11 @@ def main():
           f"render={m_render.groups() if m_render else None} "
           f"test={m_test.groups() if m_test else None}")
 
-    # 14. Stick mapping pins XWAQuest m8integrated1 TouchConvert verbatim
-    #     (input is XR-only, so the source is pinned instead of
-    #     headless-tested). P0.2f reverted the failed P0.2e yaw/roll swap:
-    #     yaw=lx, pitch=-ly, roll=rx, throttle=ry.
+    # 14. M36 handed stick mapping (user order: the old map was
+    #     reversed vs the hand-levers; input is XR-only, so the source is
+    #     pinned instead of headless-tested). DIESTRA (default): the fly
+    #     axes (f) come from the right stick, roll/throttle (g) from the
+    #     left; ZURDA mirrors. yaw=fx, pitch=-fy, roll=gx, throttle=gy.
     input_text = (SRC.parent / "duel_input.c").read_text(encoding="utf-8")
 
     def _axis(field, var):
@@ -147,14 +150,17 @@ def main():
                        input_text)
         return m.groups() if m else (None, None)
 
-    check("yaw on left stick (lx, M8)", _axis("yaw", "lx") == ("lx", "lx"),
-          f"yaw={_axis('yaw', 'lx')}")
-    check("roll on right stick (rx, M8)", _axis("roll", "rx") == ("rx", "rx"),
-          f"roll={_axis('roll', 'rx')}")
-    check("pitch kept flight-sim (-ly)", _axis("pitch", "ly") == ("ly", "-ly"),
-          f"pitch={_axis('pitch', 'ly')}")
-    check("throttle on right Y (ry)", _axis("thr_axis", "ry") == ("ry", "ry"),
-          f"thr={_axis('thr_axis', 'ry')}")
+    check("yaw on fly X (M36 handed)", _axis("yaw", "fx") == ("fx", "fx"),
+          f"yaw={_axis('yaw', 'fx')}")
+    check("roll on guide X (M36 handed)", _axis("roll", "gx") == ("gx", "gx"),
+          f"roll={_axis('roll', 'gx')}")
+    check("pitch kept flight-sim (-fy)", _axis("pitch", "fy") == ("fy", "-fy"),
+          f"pitch={_axis('pitch', 'fy')}")
+    check("throttle on guide Y (M36 handed)", _axis("thr_axis", "gy") == ("gy", "gy"),
+          f"thr={_axis('thr_axis', 'gy')}")
+    check("handed source select (DIESTRA right flies)",
+          "float fx = s_hand_left ? lx : rx" in input_text
+          and "float gx = s_hand_left ? rx : lx" in input_text)
 
     # 15. P0.4: sim/head separation + seat calibration wiring.
     math_text = (SRC.parent / "duel_math.h").read_text(encoding="utf-8")
@@ -208,7 +214,7 @@ def main():
           "#define DUEL_SKY_STAR_COUNT 2560" in sky_text
           and "#define DUEL_XWA_STAR_TWINKLE 0" in sky_text)
     check("DUEL_SKY telemetry logged once",
-          "DUEL_SKY mode=XWA_ORIGINAL" in text)
+          '"DUEL_SKY env=%d mode=XWA_ORIGINAL' in text)
 
     # 18. P1.2: native audio (sim untouched, events by polling).
     audio_text = (SRC.parent / "duel_audio.c").read_text(encoding="utf-8")
@@ -301,9 +307,9 @@ def main():
           "#define DUEL_CELESTIAL 1" in text)
     check("env sphere rotation-only sky, additive pipe",
           "DuelMat4 esky = duel_m4_rigid_inv(eq, duel_v3(0.0f, 0.0f, 0.0f));" in text
-          and "ebinds[1].texture = r->env_tex;" in text)
+          and "ebinds[1].texture = r->env_tex[r->env_active];" in text)
     check("old sun retired while env present",
-          "r->spr_tex[DUEL_SPR_SUN] && !r->env_tex" in text)
+          "r->spr_tex[DUEL_SPR_SUN] && !r->env_tex[r->env_active]" in text)
     check("flare gain-gated, world-anchored",
           "duel_flare_gain(cam_fwd, fsun)" in text
           and "spr_draw[spr_count].tex = DUEL_SPR_FLARE;" in text
@@ -339,11 +345,10 @@ def main():
           and "1.0f, 0.6f, 0.1f, 0.9f" in text
           and "Duel_GuideDir(&s->player" not in text)
     check("planet-disc cull env-gated",
-          "DUEL_PLANET_CULL_DOT" in text
-          and "if (dot > DUEL_PLANET_CULL_DOT) { culled++; continue; }" in text
-          and "if (r->env_tex) {" in text)
+          "if (dot > e->cull_dot) { culled++; continue; }" in text
+          and "if (r->env_tex[env]) {" in text)
     check("stars built after env load",
-          text.index("build_stars(r);") > text.index('r->env_tex = load_cook_tex'))
+          text.index("build_stars_for(r, e);") > text.index("env_tex[e] = load_cook_tex"))
 
     # 27. M3.0 virtual hands: visual/tracking only through the seat path.
     xr_text = XR_SRC.read_text(encoding="utf-8")
@@ -414,7 +419,7 @@ def main():
           and "DuelLever_IsPrim(mi, m->prims[i].prim_idx)" in text
           and "DuelStick_ModelOffset(r->defl_pd, r->defl_rd, lever_m)" in text)
     check("TIE keeps legacy single pass",
-          "draw_model(r, NULL, cmd, rp, &r->tie, vp.m, tm.m, 0, 0, NULL)" in text)
+          "draw_model(r, NULL, cmd, rp, tmod, vp.m, tm.m, 0, 0, NULL)" in text)
     check("quadrant HOLDER owns throttle, stick integrates else",
           "s->hand_thr_active" in sim_text
           and "r->grab_holder[DUEL_TGT_QUAD]" in text
@@ -428,8 +433,8 @@ def main():
           and "DuelRender_HandLever(render, &ld)" in main_text
           and "s->hand_stk_active" in sim_text
           and "s->hand_lev_active" in sim_text
-          and "yaw = fabsf(s->hand_yaw)" in sim_text
-          and "roll = fabsf(s->hand_lev_roll)" in sim_text)
+          and "yaw = Duel_StickCurve(s->hand_yaw" in sim_text
+          and "roll = Duel_StickCurve(s->hand_lev_roll" in sim_text)
     check("M6 no bank coordination",
           "DUEL_COORD_YAW * roll" not in sim_text
           and "coordination deleted" in cfg_text)
@@ -526,12 +531,15 @@ def main():
           and "r->grab_holder[DUEL_TGT_STICK] == fside" in text)
     # 38. M5 skirmish: 3 ties vs player + 2 allies, team-only damage.
     sim_hdr = (SRC.parent / "duel_sim.h").read_text(encoding="utf-8")
-    check("M5 counts",
+    check("M5 counts (M31: asymmetric forces)",
           "#define DUEL_TIE_COUNT 5" in sim_hdr
           and "#define DUEL_ALLY_COUNT 4" in sim_hdr
-          and "#define DUEL_SKIRMISH_MIN 1" in sim_hdr
-          and "#define DUEL_SKIRMISH_MAX 5" in sim_hdr
-          and "#define DUEL_SKIRMISH_DEFAULT 3" in sim_hdr)
+          and "#define DUEL_FOES_MIN 0" in sim_hdr
+          and "#define DUEL_FOES_MAX 5" in sim_hdr
+          and "#define DUEL_FOES_DEFAULT 3" in sim_hdr
+          and "#define DUEL_ALLIES_MIN 0" in sim_hdr
+          and "#define DUEL_ALLIES_MAX 4" in sim_hdr
+          and "#define DUEL_ALLIES_DEFAULT 2" in sim_hdr)
     check("M5 team damage (rebel bolts hit ties only)",
           "DUEL_SHIP_ALLY" in sim_text
           and "the player's shots can never hurt friendlies" in sim_text)
@@ -540,7 +548,7 @@ def main():
           and "const DuelShip *tp = tgt >= 0" in text)
     check("M5 allies drawn from X-wing exterior",
           'load_model(r, &r->xwing, "XwingExterior")' in text
-          and "draw_model(r, NULL, cmd, rp, &r->xwing" in text)
+          and "draw_model(r, NULL, cmd, rp, amod, vp.m, am.m" in text)
     check("M5 wave resets on last tie or player death",
           "Duel_TiesAlive(s) == 0" in sim_text)
     check("M5 hand-pop gate (palm+wrist valid, 3-frame debut)",
@@ -636,11 +644,12 @@ def main():
     check("M10 touch clicks the row touched now",
           "menu.hover = hov;" in main_text
           and "prev_press = press;" in main_text)
-    check("M10 battle size applied before combat reset",
-          "Duel_SetSkirmish(&sim, menu.skirmish);" in main_text
-          and main_text.find("Duel_SetSkirmish(&sim, menu.skirmish);") <
+    check("M10 battle size applied before combat reset (M31: forces)",
+          "Duel_SetForces(&sim, menu.allies_n, menu.foes_n);" in main_text
+          and main_text.find("Duel_SetForces(&sim, menu.allies_n, menu.foes_n);") <
           main_text.find("Duel_ResetCombat(&sim);")
-          and '"BATALLA"' in menu_text
+          and '"ALIADOS"' in menu_text
+          and '"ENEMIGOS"' in menu_text
           and "Duel_TiesWanted(s)" in sim_text
           and "Duel_TiesAlive(s) == Duel_TiesWanted(s)" in text)
     check("M10 paused screen offers recenter",
@@ -671,8 +680,10 @@ def main():
           and '"DUEL menu placed head dist=%.2f"' in text)
     # 45. M13 no visible pilot body (M4 removed per user request: menu
     # pilot profiles stay, the skinned body module is gone).
-    check("M13 touch UI has no finger rays",
-          "menu_ray" not in text)
+    check("M13/M35 rays: fingers none, controllers gated",
+          "M4e: finger-ray draw removed (touch UI)." in text
+          and "duel_menu_ray_world" in text
+          and "r->menu->ray_on" in text)
     check("M13 no pilot body in render",
           "pilot_load" not in text
           and "draw_pilot" not in text
@@ -802,7 +813,7 @@ def main():
     check("MP-B1 peer rendered in duel mode",
           "duel_model_matrix(s->peer.orient, s->peer.pos)" in text
           and "tp = &s->peer" in text
-          and "s->peer.hp / DUEL_PLAYER_HP" in text)
+          and "s->peer.hp / Duel_CraftHP(s->peer.craft)" in text)
     # M21: the floating box is gone (user never saw it; the touch
     # snapped to a REAL red button on the right panel). Only the state-
     # colored PAUSA label floats; the cockpit button is the visual.
@@ -822,6 +833,153 @@ def main():
     check("M19 main pauses on cockpit button",
           "DuelRender_PauseButton(render)" in main_text
           and '"pause button"' in main_text)
+    # M27: one background scene per match (arena/Death Star/nebula).
+    # All envs preloaded at boot; the per-match swap is an index-only
+    # SetEnv (no mid-frame GPU work); env 0 keeps the M2.2 numbers.
+    env_text = (SRC.parent / "duel_env.c").read_text(encoding="utf-8")
+    env_hdr = (SRC.parent / "duel_env.h").read_text(encoding="utf-8")
+    check("M27 env table + preload + per-match pick",
+          "#define DUEL_ENV_COUNT 3" in env_hdr
+          and '"space_env.png"' in env_text
+          and '"site_blue1_env.png"' in env_text
+          and '"site_blue3_env.png"' in env_text
+          and "deathstar_env.png" not in env_text
+          and "env_tex[e] = load_cook_tex" in text
+          and "build_stars_for(r, e);" in text
+          and "void DuelRender_SetEnv(DuelRender *r, int env)" in text
+          and "DuelRender_SetEnv(render, DuelEnv_Pick(" in main_text
+          and "Duel_ResetDuel" in main_text)
+    check("M27 env0 keeps the M2.2 measured numbers",
+          "0.4049f" in env_text
+          and "0.4922f" in env_text
+          and "0.9613f" in env_text
+          and "0.9175f" in env_text
+          and "0.2246f" in env_text)
+    # M28: XWA setup (MI NAVE + ENEMIGA over X-Wing/TIE/Interceptor).
+    # Kind stays role/team; craft is the airframe (stats/geometry).
+    check("M28 craft setup wiring",
+          '"MI NAVE"' in menu_text
+          and '"ENEMIGA"' in menu_text
+          and '"TIE INT"' in menu_text
+          and "Duel_SetCrafts(&sim, menu.craft_player," in main_text
+          and "Duel_CraftHP(s->craft_enemy)" in sim_text
+          and "DUEL_IN_MUZZ_FWD" in sim_text)
+    check("M28 interceptor exterior + fallback",
+          'load_model(r, &r->tiein, "TieInterceptor")' in text
+          and "duel_craft_model(r, s->peer.craft)" in text
+          and "r->tiein.vbo ? &r->tiein : &r->tie" in text
+          and "s->peer.hp / Duel_CraftHP(s->peer.craft)" in text)
+    # M29: skirmish mirror (the ENEMIGA-no-cambio fix: picks used to
+    # apply to the duel only). Ties fly ENEMIGA, allies MI NAVE;
+    # muzzles strictly follow the airframe (no owner override).
+    check("M29 skirmish mirror",
+          "DUEL_TIE_HP * dhp, s->craft_enemy" in sim_text
+          and "DUEL_ALLY_HP, s->craft_player" in sim_text
+          and "int craft = sh->craft;\n    (void)owner;" in sim_text
+          and "duel_craft_model(r, s->ties[k].craft)" in text
+          and "duel_craft_model(r, s->allies[k].craft)" in text
+          and '"%s+%d VS %d %s"' in menu_text)
+    # M30: cruiser battle (ISD gun platform, MODO 3-way). Hull spheres
+    # + turret volleys in sim; pseudo-ship drives cue/lead/bar; kill
+    # stages across the hull; player bar is craft-sized.
+    check("M30 cruiser battle wiring",
+          '"CRUCERO"' in menu_text
+          and '"TORRETAS: %d"' in menu_text
+          and "(m->duel_mode + step + 3) % 3" in menu_text
+          and "Duel_ResetCruiser(&sim)" in main_text
+          and "Duel_UpdateCruiser(&sim, &in, dt)" in main_text
+          and "duel_cruiser_volley(s, dt);" in sim_text
+          and "duel_cruiser_ram(s, dt);" in sim_text
+          and 'load_model(r, &r->isd, "StarDestroyer")' in text
+          and "draw_model(r, NULL, cmd, rp, &r->isd, vp.m, cm.m" in text
+          and "cship.pos = s->cruiser.pos;" in text
+          and "s->cruiser.hp / DUEL_CRUISER_HP" in text
+          and "s->player.hp / Duel_CraftHP(s->player.craft)" in text
+          and '"DUEL cruiser destroyed"' in text)
+    # M31: asymmetric forces (ALIADOS 0..4 + ENEMIGOS 0..5, skirmish
+    # clamps foes >= 1, cruiser escorts from the pick, 1v0 = guns-only).
+    check("M31 asymmetric forces",
+          "Duel_SetForces(DuelState *s, int allies, int foes)" in sim_text
+          and "Duel_TiesWanted(s); i < DUEL_TIE_COUNT; i++" in sim_text
+          and "Duel_AlliesWanted(s); i < DUEL_ALLY_COUNT; i++" in sim_text
+          and '"TORR:10+TIE:%d"' in menu_text
+          and "duel_cruiser_ram_one(&s->ties[k], s, dt);" in sim_text)
+    # M32: cruiser subsystems (10 turrets + 2 domes + bridge, 15/15/30
+    # bolts; dead turret skipped, dead bridge silences, dead domes
+    # double hull damage) with diamonds + micro bars; ENEMIGA locks
+    # in a guns-only cruiser.
+    check("M32 cruiser subsystems",
+          "duel_cruiser_sub_redirect(s, l)" in sim_text
+          and "sub_hp[bi] -= dmg;" in sim_text
+          and "dmg * duel_shield_mult(s)" in sim_text
+          and "Duel_CruiserSubPos(s, bi)" in sim_text
+          and "Duel_CruiserSubPos(s, bi)" in text
+          and "DUEL_CRUISER_SUBS; bi++" in text
+          and '"---"' in menu_text
+          and "m->duel_mode == 2 && m->foes_n == 0" in menu_text)
+    # M33: stick expo (deadzone rescale + cubic blend) on every turn
+    # axis, stick and hand levers alike: fine aim near center, full
+    # rate at the stops.
+    check("M33 stick expo",
+          "float Duel_StickCurve(float x, float dead)" in sim_text
+          and "Duel_StickCurve(in->pitch, DUEL_DEADZONE)" in sim_text
+          and "Duel_StickCurve(s->hand_pitch, s->hand_dead)" in sim_text
+          and "Duel_StickCurve(s->hand_lev_roll, s->hand_dead)" in sim_text)
+    # M34: CONTINUE? on AI defeat (the lost battle holds behind RESULT;
+    # CONTINUAR respawns the player into it, REPETIR/MENU unchanged).
+    check("M34 continue after death",
+          "DUEL_ACT_CONTINUE" in menu_text
+          and '"CONTINUAR?"' in menu_text
+          and '"CONTINUAR", DUEL_ACT_CONTINUE' in menu_text
+          and "void Duel_RespawnPlayer(DuelState *s)" in sim_text
+          and "!s->result_hold" in sim_text
+          and "sim.result_hold = 1;" in main_text
+          and "Duel_RespawnPlayer(&sim);" in main_text
+          and '"DUEL defeat: CONTINUAR?' in main_text)
+    # M35: (a) menu flicker: the HUD gate is actually read + the HUD
+    # is re-shown on combat entry; (b) dash HP% readout; (c) controller
+    # ray + A/B (XWAQuestVR parity) with a RAYO MANDO option.
+    input_text = (SRC.parent / "duel_input.c").read_text(encoding="utf-8")
+    check("M35 menu flicker gate",
+          "if (!r->menu_hide_hud) {" in text
+          and "DuelRender_SetCombatHud(render, 1);" in main_text)
+    check("M35 dash HP readout",
+          "DUEL_DASHHP_SHIP" in text
+          and '"%d%%"' in text
+          and "DUEL_DASHHP_SHIP" in hands_text)
+    check("M35 controller ray + AB",
+          '"RAYO MANDO"' in menu_text
+          and "DuelMenu_RayHit(" in menu_text
+          and "r->menu->ray_on" in text
+          and "DuelRender_ControllerAim" in text
+          and "DuelRender_ControllerAim(render, 0" in main_text
+          and "abtn_edge" in main_text
+          and "bbtn_edge" in main_text
+          and "/user/hand/right/input/a/click" in input_text
+          and "/user/hand/right/input/b/click" in input_text
+          and "/user/hand/right/input/aim/pose" in input_text)
+    # M36: sticks un-reversed (right hand flies by default, ZURDA mirrors
+    # via OPCIONES->MANO), either trigger fires, CONTINUE? respawns
+    # shielded (same spot, 3 s damage-free).
+    check("M36 handed sticks + mercy shield",
+          '"MANO"' in menu_text
+          and "DuelInput_SetLeftHanded(menu.hand_left);" in main_text
+          and "s_hand_left ? lx : rx" in input_text
+          and "s_fire_r || s_fire_l" in input_text
+          and "shield_t = DUEL_RESPAWN_SHIELD_S;" in sim_text
+          and "shield_t <= 0.0f" in sim_text)
+    # M37: ray dot lands on the panel (cursor feel) + the cruiser guns
+    # obey difficulty (rookie sprays wide and slow, ace tight + fast).
+    check("M37 ray dot + kind cruiser",
+          "M37 ray dot" in text
+          and "DUEL_CRUISER_VOLLEY_CD * dcd" in sim_text
+          and "rookie x2.0 (sprays), ace x0.6 (snipes)" in sim_text)
+    # M38: the beam dies where the dot lands (one plane test drives
+    # both; full beam only on a clean panel miss).
+    check("M38 beam dies at dot",
+          "DuelMenu_RayPlane(" in menu_text
+          and "DuelMenu_RayPlane(r->menu" in text
+          and "beam dies at the" in text)
 
     if FAILURES:
         print(f"{len(FAILURES)} FAILURES")

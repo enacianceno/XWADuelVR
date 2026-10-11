@@ -67,6 +67,9 @@ void DuelRender_SetMenuPanel(DuelRender *r, int show, const DuelMenu *m,
 void DuelRender_PlaceMenuHome(DuelRender *r, const DuelMenu *m,
                               DuelVec3 hpos, DuelQuat hquat);
 void DuelRender_SetCombatHud(DuelRender *r, int show);
+/* M35: publish one controller aim pose (XR LOCAL space, per frame). */
+void DuelRender_ControllerAim(DuelRender *r, int side, DuelVec3 pos,
+                              DuelQuat quat, int valid);
 void DuelRender_ClearGrabs(DuelRender *r);
 void DuelRender_RequestRecenter(DuelRender *r);
 int DuelRender_MenuPointer(const DuelRender *r, int *row, float *x, float *y);
@@ -75,6 +78,9 @@ int DuelRender_PauseButton(DuelRender *r);
 
 /* M3.4: 1 while the right index trigger is pulled, else 0. */
 int DuelRender_HandFire(const DuelRender *r);
+
+/* M27: select the background scene (0..DUEL_ENV_COUNT-1, clamped). */
+void DuelRender_SetEnv(DuelRender *r, int env);
 
 /* Seat (pilot eye) offset in ship space. Tunable; see checkpoint. */
 extern const DuelVec3 DUEL_SEAT_POS;

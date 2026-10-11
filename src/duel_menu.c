@@ -8,26 +8,55 @@
 
 static const char *kDiffName[3] = { "FACIL", "NORMAL", "DIFICIL" };
 
-/* M10: brief force lines follow the battle size (X-WING VS n TIE /
- * ALIADOS: n X-WING, SIN ALIADOS at 1v1). Rebuilt on init, screen
- * change, and BATALLA cycle (rows point at these buffers). */
+/* M28: XWA setup craft names (indexed by DuelCraft). */
+static const char *kCraftName[DUEL_CRAFT_COUNT] =
+    { "X-WING", "TIE", "TIE INT" };
+
+/* M31: brief force lines follow the asymmetric picks (1 TU + n
+ * ALIADOS vs m ENEMIGOS; skirmish needs >= 1 foe). Rebuilt on init,
+ * screen change, and force cycle (rows point at these buffers). */
 static void duel_refresh_brief(DuelMenu *m) {
-    int want = m->skirmish;
+    int foes = m->foes_n;
+    int allies = m->allies_n;
+    if (foes < DUEL_FOES_MIN || foes > DUEL_FOES_MAX)
+        foes = DUEL_FOES_DEFAULT;
+    if (allies < DUEL_ALLIES_MIN || allies > DUEL_ALLIES_MAX)
+        allies = DUEL_ALLIES_DEFAULT;
+    if (m->duel_mode == 2) {
+        int cp = (m->craft_player >= 0 && m->craft_player < DUEL_CRAFT_COUNT) ?
+            m->craft_player : DUEL_CRAFT_XWING;
+        snprintf(m->dyn[4], sizeof(m->dyn[4]), "%s VS ISD", kCraftName[cp]);
+        if (foes > 0)
+            snprintf(m->dyn[5], sizeof(m->dyn[5]), "TORR:10+TIE:%d", foes);
+        else
+            snprintf(m->dyn[5], sizeof(m->dyn[5]), "TORRETAS: %d",
+                     DUEL_CRUISER_TURRETS);
+        return;
+    }
     if (m->duel_mode) {
-        snprintf(m->dyn[4], sizeof(m->dyn[4]), "DUELO PVP 1V1");
+        int cp = (m->craft_player >= 0 && m->craft_player < DUEL_CRAFT_COUNT) ?
+            m->craft_player : DUEL_CRAFT_XWING;
+        int ce = (m->craft_enemy >= 0 && m->craft_enemy < DUEL_CRAFT_COUNT) ?
+            m->craft_enemy : DUEL_CRAFT_TIEIN;
+        snprintf(m->dyn[4], sizeof(m->dyn[4]), "%s VS %s",
+                 kCraftName[cp], kCraftName[ce]);
         snprintf(m->dyn[5], sizeof(m->dyn[5]), "RIVAL: OTRO PILOTO");
         return;
     }
-    int allies;
-    if (want < DUEL_SKIRMISH_MIN || want > DUEL_SKIRMISH_MAX)
-        want = DUEL_SKIRMISH_DEFAULT;
-    allies = want - 1;
-    snprintf(m->dyn[4], sizeof(m->dyn[4]), "X-WING VS %d TIE", want);
-    if (allies > 0)
-        snprintf(m->dyn[5], sizeof(m->dyn[5]), "ALIADOS: %d X-WING",
-                 allies);
-    else
-        snprintf(m->dyn[5], sizeof(m->dyn[5]), "SIN ALIADOS");
+    {
+        int cp = (m->craft_player >= 0 && m->craft_player < DUEL_CRAFT_COUNT) ?
+            m->craft_player : DUEL_CRAFT_XWING;
+        int ce = (m->craft_enemy >= 0 && m->craft_enemy < DUEL_CRAFT_COUNT) ?
+            m->craft_enemy : DUEL_CRAFT_TIEIN;
+        if (foes < 1) foes = 1; /* skirmish needs an enemy */
+        snprintf(m->dyn[4], sizeof(m->dyn[4]), "%s+%d VS %d %s",
+                 kCraftName[cp], allies, foes, kCraftName[ce]);
+        if (allies > 0)
+            snprintf(m->dyn[5], sizeof(m->dyn[5]), "ALIADOS: %d %s",
+                     allies, kCraftName[cp]);
+        else
+            snprintf(m->dyn[5], sizeof(m->dyn[5]), "SIN ALIADOS");
+    }
 }
 
 /* M19: RESULT series line follows round/won/best (clamped for display). */
@@ -46,8 +75,12 @@ void DuelMenu_Init(DuelMenu *m) {
     m->sel = 0;
     m->hover = -1;
     m->difficulty = DUEL_DIFF_ROOKIE; /* M9: EASY by default (user order) */
-    m->skirmish = DUEL_SKIRMISH_DEFAULT; /* M10: 3v3 keeps M5/M9 battle */
+    /* M31: 3v3 by default (the frozen M5/M6/M9 battle). */
+    m->allies_n = DUEL_ALLIES_DEFAULT;
+    m->foes_n = DUEL_FOES_DEFAULT;
     m->duel_mode = 0; /* MP-B1: skirmish vs AI by default */
+    m->craft_player = DUEL_CRAFT_XWING; /* M28 setup */
+    m->craft_enemy = DUEL_CRAFT_TIEIN;
     m->series_best = 3; /* M19 rounds default */
     m->series_round = 0;
     m->series_won = 0;
@@ -56,6 +89,8 @@ void DuelMenu_Init(DuelMenu *m) {
     m->vol_music = 0.65f;
     m->vol_sfx = 1.0f;
     m->sens = 1.0f;
+    m->ray_on = 1; /* M35 controller ray selects by default */
+    m->hand_left = 0; /* M36 right-handed by default (right stick flies) */
     m->dead = 0.15f;
     m->pilot_idx = -1;
     DuelPilot_Defaults(&m->pilot, "");
@@ -111,7 +146,12 @@ const char *DuelMenu_Title(const DuelMenu *m) {
     case DUEL_APP_OPTIONS: return "OPCIONES";
     case DUEL_APP_PILOTS: return "PILOTOS";
     case DUEL_APP_PAUSED: return "PAUSA";
-    case DUEL_APP_RESULT: return m->result_win ? "VICTORIA" : "DERROTA";
+    /* M34: defeat vs AI asks CONTINUE? (the battle is held behind
+     * the screen); the decided duel keeps DERROTA (no continue).
+     * ASCII only: the stroke font blanks unknown glyphs. */
+    case DUEL_APP_RESULT:
+        if (m->result_win) return "VICTORIA";
+        return m->duel_mode == 1 ? "DERROTA" : "CONTINUAR?";
     default: return "";
     }
 }
@@ -135,9 +175,12 @@ int DuelMenu_Rows(const DuelMenu *m, DuelMenuRow *out, int cap) {
         ROW(DUEL_ROW_LABEL, m->dyn[4], DUEL_ACT_NONE);
         ROW(DUEL_ROW_LABEL, m->dyn[5], DUEL_ACT_NONE);
         ROW(DUEL_ROW_CHOICE, "DIFICULTAD", DUEL_ACT_NONE);
-        ROW(DUEL_ROW_CHOICE, "BATALLA", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "ALIADOS", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "ENEMIGOS", DUEL_ACT_NONE);
         ROW(DUEL_ROW_CHOICE, "RONDAS", DUEL_ACT_NONE);
         ROW(DUEL_ROW_CHOICE, "MODO", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "MI NAVE", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "ENEMIGA", DUEL_ACT_NONE);
         ROW(DUEL_ROW_ACTION, "INICIAR", DUEL_ACT_START);
         ROW(DUEL_ROW_ACTION, "VOLVER", DUEL_ACT_BACK);
         break;
@@ -147,6 +190,8 @@ int DuelMenu_Rows(const DuelMenu *m, DuelMenuRow *out, int cap) {
         ROW(DUEL_ROW_SLIDER, "EFECTOS", DUEL_ACT_NONE);
         ROW(DUEL_ROW_SLIDER, "SENSIBILIDAD", DUEL_ACT_NONE);
         ROW(DUEL_ROW_SLIDER, "ZONA MUERTA", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "RAYO MANDO", DUEL_ACT_NONE);
+        ROW(DUEL_ROW_CHOICE, "MANO", DUEL_ACT_NONE);
         ROW(DUEL_ROW_ACTION, "RECENTRAR", DUEL_ACT_RECENTER);
         ROW(DUEL_ROW_ACTION, "VOLVER", DUEL_ACT_BACK);
         break;
@@ -169,6 +214,10 @@ int DuelMenu_Rows(const DuelMenu *m, DuelMenuRow *out, int cap) {
     case DUEL_APP_RESULT:
         ROW(DUEL_ROW_LABEL, m->dyn[3], DUEL_ACT_NONE);
         ROW(DUEL_ROW_LABEL, m->series_line, DUEL_ACT_NONE);
+        /* M34: defeat vs AI offers CONTINUAR first (respawn into the
+         * held battle); victory and the decided duel keep REPETIR. */
+        if (!m->result_win && m->duel_mode != 1)
+            ROW(DUEL_ROW_ACTION, "CONTINUAR", DUEL_ACT_CONTINUE);
         ROW(DUEL_ROW_ACTION, "REPETIR", DUEL_ACT_REPEAT);
         ROW(DUEL_ROW_ACTION, "MENU", DUEL_ACT_QUIT_TO_MENU);
         break;
@@ -219,6 +268,41 @@ int DuelMenu_RowRect(const DuelMenu *m, int row,
     if (y0) *y0 = top - DUEL_MENU_ROW_H;
     if (y1) *y1 = top;
     return 1;
+}
+
+int DuelMenu_RayPlane(const DuelMenu *m, DuelVec3 ro, DuelVec3 rd,
+                       DuelVec3 c, DuelVec3 right, DuelVec3 up, DuelVec3 n,
+                       float *lx, float *ly, float *t) {
+    float denom, tt, hx, hy, hw, hh;
+    DuelVec3 rel, hit;
+    if (!m) return 0;
+    denom = duel_v3_dot(rd, n);
+    if (denom >= -1e-6f) return 0; /* parallel or facing away */
+    rel = duel_v3_sub(c, ro);
+    tt = duel_v3_dot(rel, n) / denom;
+    if (tt <= 0.0f || tt > 5.0f) return 0;
+    hit = duel_v3_add(ro, duel_v3_scale(rd, tt));
+    rel = duel_v3_sub(hit, c);
+    hx = duel_v3_dot(rel, right);
+    hy = duel_v3_dot(rel, up);
+    hw = DUEL_MENU_PANEL_W * 0.5f;
+    hh = DuelMenu_PanelH(m) * 0.5f;
+    if (fabsf(hx) > hw || fabsf(hy) > hh) return 0;
+    if (lx) *lx = hx;
+    if (ly) *ly = hy;
+    if (t) *t = tt;
+    return 1;
+}
+
+int DuelMenu_RayHit(const DuelMenu *m, DuelVec3 ro, DuelVec3 rd,
+                     DuelVec3 c, DuelVec3 right, DuelVec3 up, DuelVec3 n,
+                     float *lx, float *ly) {
+    float hx, hy;
+    if (!DuelMenu_RayPlane(m, ro, rd, c, right, up, n, &hx, &hy, NULL))
+        return -1;
+    if (lx) *lx = hx;
+    if (ly) *ly = hy;
+    return DuelMenu_HitRow(m, hx, hy);
 }
 
 int DuelMenu_HitRow(const DuelMenu *m, float x, float y) {
@@ -289,7 +373,7 @@ void DuelMenu_Adjust(DuelMenu *m, int dir) {
     float step = (dir > 0) ? 1.0f : -1.0f;
     if (m->sel < 0 || m->sel >= n) return;
     if (rows[m->sel].kind == DUEL_ROW_CHOICE) {
-        /* M10: choice rows cycle by label (DIFICULTAD + BATALLA + RONDAS). */
+        /* M10: choice rows cycle by label (M31: + ALIADOS + ENEMIGOS). */
         if (!strcmp(rows[m->sel].label, "RONDAS")) {
             if (dir > 0)
                 m->series_best = m->series_best >= 5 ? 1 :
@@ -301,17 +385,49 @@ void DuelMenu_Adjust(DuelMenu *m, int dir) {
             return;
         }
         if (!strcmp(rows[m->sel].label, "MODO")) {
-            m->duel_mode = m->duel_mode ? 0 : 1;
+            int step = dir > 0 ? 1 : -1; /* M30: 3 modes */
+            m->duel_mode = (m->duel_mode + step + 3) % 3;
             duel_refresh_brief(m);
             return;
         }
-        if (!strcmp(rows[m->sel].label, "BATALLA")) {
-            m->skirmish += (dir > 0) ? 1 : -1;
-            if (m->skirmish < DUEL_SKIRMISH_MIN)
-                m->skirmish = DUEL_SKIRMISH_MAX;
-            if (m->skirmish > DUEL_SKIRMISH_MAX)
-                m->skirmish = DUEL_SKIRMISH_MIN;
+        if (!strcmp(rows[m->sel].label, "MI NAVE")) {
+            int step = dir > 0 ? 1 : -1;
+            m->craft_player = (m->craft_player + step + DUEL_CRAFT_COUNT) %
+                DUEL_CRAFT_COUNT;
             duel_refresh_brief(m);
+            return;
+        }
+        if (!strcmp(rows[m->sel].label, "ENEMIGA")) {
+            int step = dir > 0 ? 1 : -1;
+            /* M32: locked in a guns-only cruiser (no enemy ship). */
+            if (m->duel_mode == 2 && m->foes_n == 0) return;
+            m->craft_enemy = (m->craft_enemy + step + DUEL_CRAFT_COUNT) %
+                DUEL_CRAFT_COUNT;
+            duel_refresh_brief(m);
+            return;
+        }
+        if (!strcmp(rows[m->sel].label, "ALIADOS")) {
+            int step = dir > 0 ? 1 : -1;
+            m->allies_n = (m->allies_n + step +
+                           (DUEL_ALLIES_MAX + 1)) % (DUEL_ALLIES_MAX + 1);
+            duel_refresh_brief(m);
+            return;
+        }
+        if (!strcmp(rows[m->sel].label, "ENEMIGOS")) {
+            int step = dir > 0 ? 1 : -1;
+            m->foes_n = (m->foes_n + step +
+                         (DUEL_FOES_MAX + 1)) % (DUEL_FOES_MAX + 1);
+            duel_refresh_brief(m);
+            return;
+        }
+        /* M35: RAYO MANDO toggles controller-ray selection. */
+        if (!strcmp(rows[m->sel].label, "RAYO MANDO")) {
+            m->ray_on = m->ray_on ? 0 : 1;
+            return;
+        }
+        /* M36: MANO picks the flying hand (sticks mirror). */
+        if (!strcmp(rows[m->sel].label, "MANO")) {
+            m->hand_left = m->hand_left ? 0 : 1;
             return;
         }
         m->difficulty += (dir > 0) ? 1 : -1;
@@ -373,16 +489,37 @@ void DuelMenu_RowValue(const DuelMenu *m, int row, char *out, int cap) {
             int b = (m->series_best == 1 || m->series_best == 5) ?
                 m->series_best : 3;
             snprintf(out, (size_t)cap, "%d", b);
-        /* MP-B1: MODO shows ESCARAMUZA/DUELO. */
+        /* MP-B1: MODO shows ESCARAMUZA/DUELO (+M30 CRUCERO). */
         } else if (!strcmp(rows[row].label, "MODO")) {
             snprintf(out, (size_t)cap, "%s",
-                     m->duel_mode ? "DUELO" : "ESCARAMUZA");
-        /* M10: BATALLA shows 1V1..5V5. */
-        } else if (!strcmp(rows[row].label, "BATALLA")) {
-            int w = m->skirmish;
-            if (w < DUEL_SKIRMISH_MIN || w > DUEL_SKIRMISH_MAX)
-                w = DUEL_SKIRMISH_DEFAULT;
-            snprintf(out, (size_t)cap, "%dV%d", w, w);
+                     m->duel_mode == 2 ? "CRUCERO" :
+                     m->duel_mode == 1 ? "DUELO" : "ESCARAMUZA");
+        } else if (!strcmp(rows[row].label, "MI NAVE")) {
+            int c = (m->craft_player >= 0 && m->craft_player < DUEL_CRAFT_COUNT) ?
+                m->craft_player : DUEL_CRAFT_XWING;
+            snprintf(out, (size_t)cap, "%s", kCraftName[c]);
+        } else if (!strcmp(rows[row].label, "ENEMIGA")) {
+            int c = (m->craft_enemy >= 0 && m->craft_enemy < DUEL_CRAFT_COUNT) ?
+                m->craft_enemy : DUEL_CRAFT_TIEIN;
+            if (m->duel_mode == 2 && m->foes_n == 0)
+                snprintf(out, (size_t)cap, "---");
+            else
+                snprintf(out, (size_t)cap, "%s", kCraftName[c]);
+        /* M31: force counts. */
+        } else if (!strcmp(rows[row].label, "ALIADOS")) {
+            int w = m->allies_n;
+            if (w < DUEL_ALLIES_MIN || w > DUEL_ALLIES_MAX)
+                w = DUEL_ALLIES_DEFAULT;
+            snprintf(out, (size_t)cap, "%d", w);
+        } else if (!strcmp(rows[row].label, "ENEMIGOS")) {
+            int w = m->foes_n;
+            if (w < DUEL_FOES_MIN || w > DUEL_FOES_MAX)
+                w = DUEL_FOES_DEFAULT;
+            snprintf(out, (size_t)cap, "%d", w);
+        } else if (!strcmp(rows[row].label, "RAYO MANDO")) {
+            snprintf(out, (size_t)cap, "%s", m->ray_on ? "SI" : "NO");
+        } else if (!strcmp(rows[row].label, "MANO")) {
+            snprintf(out, (size_t)cap, "%s", m->hand_left ? "ZURDA" : "DIESTRA");
         } else {
             snprintf(out, (size_t)cap, "%s", kDiffName[m->difficulty]);
         }

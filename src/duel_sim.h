@@ -13,6 +13,15 @@ typedef enum DuelShipKind { DUEL_SHIP_PLAYER = 0, DUEL_SHIP_TIE = 1,
                             DUEL_SHIP_ALLY = 2, DUEL_SHIP_PEER = 3
 } DuelShipKind;
 
+/* M28: flyable craft (XWA skirmish setup). Kind stays the ROLE/team
+ * (who can hit whom); craft is the airframe (stats/geometry/muzzles).
+ * The cockpit is always the X-Wing for now; the pick changes flight
+ * model everywhere and the exterior model for AI/peer ships. */
+typedef enum DuelCraft { DUEL_CRAFT_XWING = 0, DUEL_CRAFT_TIE = 1,
+                         DUEL_CRAFT_TIEIN = 2
+} DuelCraft;
+#define DUEL_CRAFT_COUNT 3
+
 /* M5 skirmish: up to 5 TIEs vs player + up to 4 X-wing allies.
  * Bolts only ever hit the ENEMY team (rebel bolts -> ties; imperial
  * bolts -> rebels), so no friendly fire in either direction and no
@@ -20,9 +29,13 @@ typedef enum DuelShipKind { DUEL_SHIP_PLAYER = 0, DUEL_SHIP_TIE = 1,
  * ships spawn parked and dead. */
 #define DUEL_TIE_COUNT 5
 #define DUEL_ALLY_COUNT 4
-#define DUEL_SKIRMISH_MIN 1
-#define DUEL_SKIRMISH_MAX 5
-#define DUEL_SKIRMISH_DEFAULT 3 /* 3v3 = the frozen M5/M6/M9 battle */
+/* M31: asymmetric forces (1v3, 4v1, 1v0 vs the cruiser...). */
+#define DUEL_FOES_MIN 0
+#define DUEL_FOES_MAX 5
+#define DUEL_FOES_DEFAULT 3     /* +2 allies = the frozen 3v3 battle */
+#define DUEL_ALLIES_MIN 0
+#define DUEL_ALLIES_MAX 4
+#define DUEL_ALLIES_DEFAULT 2
 
 typedef struct DuelShip {
     DuelVec3 pos;
@@ -33,6 +46,8 @@ typedef struct DuelShip {
     float fire_cd;    /* seconds until can fire again */
     int alive;
     int muzzle;       /* alternating muzzle index */
+    int craft;        /* M28: DuelCraft airframe (stats/geometry) */
+    float shield_t;   /* M36: damage-free seconds left (respawn mercy) */
 } DuelShip;
 
 typedef struct DuelLaser {
@@ -53,6 +68,20 @@ typedef enum DuelTieState {
 
 typedef enum DuelPhase { DUEL_PHASE_COMBAT = 0, DUEL_PHASE_DESTROYED } DuelPhase;
 
+/* M30: Star Destroyer (stationary; hull = 6 world spheres, computed
+ * once at reset from the ship-frame table). Turrets cycle volleys at
+ * the nearest rebel with lead + deterministic wobble. */
+typedef struct DuelCruiser {
+    DuelVec3 pos;
+    DuelQuat orient;
+    float hp;
+    int alive;
+    float fire_cd;
+    int turret_next;
+    DuelVec3 sph[DUEL_CRUISER_SPHERES];
+    float sub_hp[DUEL_CRUISER_SUBS]; /* M32: 0 = destroyed */
+} DuelCruiser;
+
 typedef struct DuelInput {
     float yaw;      /* -1..1, left stick X (M8 axes[0]) */
     float pitch;    /* -1..1, -left stick Y (M8 axes[1]); + = nose up */
@@ -62,6 +91,14 @@ typedef struct DuelInput {
     int menu;       /* M7: left menu button level (pause/menu select) */
     /* P0.4: raw sticks (telemetry; proves the live mapping on-device) */
     float raw_lx, raw_ly, raw_rx, raw_ry;
+    /* M35 XWAQuestVR parity: right A = confirm, right B = back (levels;
+     * main edge-detects). aim_* = controller aim poses (XR LOCAL space,
+     * 0 left / 1 right; valid = tracked this poll). */
+    int btn_a;
+    int btn_b;
+    int aim_valid[2];
+    DuelVec3 aim_pos[2];
+    DuelQuat aim_quat[2];
 } DuelInput;
 
 typedef struct DuelState {
@@ -102,20 +139,47 @@ typedef struct DuelState {
      * (default 0.15 = DUEL_DEADZONE; controllers keep the #define). */
     int diff;
     float hand_dead;
-    /* M10: battle size 1..5 (ships per side; player counts for rebels).
-     * Wanted TIEs = skirmish, wanted allies = skirmish - 1. Survives
-     * combat resets (menu-owned, like diff). */
-    int skirmish;
+    /* M31: asymmetric forces (menu-owned, survive resets).
+     * Wanted TIEs = foes_n (skirmish clamps to >= 1; cruiser
+     * allows 0 = guns-only ISD), wanted allies = allies_n. */
+    int allies_n;
+    int foes_n;
+    /* M28: XWA setup picks (DuelCraft, menu-owned, survive resets).
+     * craft_player drives the local ship + allies; craft_enemy drives
+     * the duel peer + skirmish ties (M29 mirror). */
+    int craft_player;
+    int craft_enemy;
+    /* M30 cruiser battle: stationary ISD gun platform (mode 2). */
+    int cruiser_mode;
+    DuelCruiser cruiser;
+    /* M34 CONTINUE?: while set, DESTROYED skips the auto-reset so the
+     * lost battle survives behind the RESULT screen (CONTINUAR
+     * respawns the player into it; cleared by resets + respawn). */
+    int result_hold;
 } DuelState;
 
 void Duel_Init(DuelState *s);
 void Duel_ResetCombat(DuelState *s);
 void Duel_Update(DuelState *s, const DuelInput *in, float dt);
+/* M34 CONTINUE?, M35 in place, M36 shielded: the player wakes where
+ * they died with full HP + DUEL_RESPAWN_SHIELD_S damage-free seconds.
+ * Everyone and everything else untouched, COMBAT again. */
+void Duel_RespawnPlayer(DuelState *s);
 /* MP-A PvP duel: face-to-face spawn (AI parked dead) + two-human step.
  * No auto-reset: the winner latches until Duel_ResetDuel. */
 void Duel_ResetDuel(DuelState *s);
 void Duel_UpdateDuel(DuelState *s, const DuelInput *in1,
                      const DuelInput *in2, float dt);
+/* M30 cruiser battle: player + 2 allies vs the ISD (offline, no net).
+ * Skirmish-style flow: DESTROYED + delay auto-resets, main records
+ * the round on the reset edge (win = player alive). */
+void Duel_ResetCruiser(DuelState *s);
+void Duel_UpdateCruiser(DuelState *s, const DuelInput *in, float dt);
+/* M30: hull sphere radii (ship-frame table lives in duel_sim.c). */
+extern const float DUEL_CRUISER_SPH_R[DUEL_CRUISER_SPHERES];
+/* M32: subsystem world position (diamonds) + max HP (bars). */
+DuelVec3 Duel_CruiserSubPos(const DuelState *s, int i);
+float Duel_CruiserSubMaxHP(int i);
 /* Main loop: publish the M3.1 grab lever state before Duel_Update. */
 void Duel_HandThrottle(DuelState *s, int active, float value);
 /* Main loop: publish the M3.3 stick deflection before Duel_Update. */
@@ -126,11 +190,21 @@ void Duel_HandLever(DuelState *s, int active, float roll);
  * hand-lever deadzone (clamped 0.05..0.30, default 0.15). */
 void Duel_SetDifficulty(DuelState *s, int diff);
 void Duel_SetHandDead(DuelState *s, float dead);
-/* M10 menu: battle size (clamped 1..5, survives combat resets). */
-void Duel_SetSkirmish(DuelState *s, int n);
+/* M31 menu: forces (allies 0..4, foes 0..5, survive resets). */
+void Duel_SetForces(DuelState *s, int allies, int foes);
+/* M28 menu: craft picks (clamped 0..DUEL_CRAFT_COUNT-1, survive resets). */
+void Duel_SetCrafts(DuelState *s, int player_craft, int enemy_craft);
+/* M28: per-craft HP + bounding radius (single source of truth for
+ * resets, collisions and the render-side hull bars). */
+float Duel_CraftHP(int craft);
+float Duel_CraftRadius(int craft);
 
 /* Steering helper (also used by tests): turn 'orient' toward 'dir'. */
 DuelQuat Duel_SteerToward(DuelQuat orient, DuelVec3 dir, float max_rad, float dt);
+/* M33 stick response curve (also used by tests): deadzone rescale +
+ * expo blend. 0 inside the deadzone, +-1 at the stops, attenuated
+ * mid-travel for fine aim. */
+float Duel_StickCurve(float x, float dead);
 
 /* M5: nearest living tie to the player (-1 = wave cleared). Drives the
  * target diamond, lead pip, head arrow and HP bar. */

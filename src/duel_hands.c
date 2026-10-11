@@ -9,6 +9,7 @@ const DuelVec3 DUEL_LEVER_PIVOT_SHIP = { 0.0f, 0.05f, -1.27f };
 const DuelVec3 DUEL_LEVER_PIVOT_MODEL = { 0.0f, 0.05f, 1.27f };
 const DuelVec3 DUEL_QUAD_SHIP = { -0.38f, 0.46f, -0.91f };
 const DuelVec3 DUEL_PAUSEBTN_SHIP = { 0.3590f, 0.4713f, -1.1595f };
+const DuelVec3 DUEL_DASHHP_SHIP = { 0.0f, 0.26f, -0.95f };
 
 /* Bone segments over XR_HAND_JOINT_*_EXT indices (PALM=0 WRIST=1
  * THUMB=2..5 INDEX=6..10 MIDDLE=11..15 RING=16..20 LITTLE=21..25). */

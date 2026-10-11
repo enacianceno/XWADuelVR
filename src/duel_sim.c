@@ -26,7 +26,8 @@ DuelVec3 duel_lead_point(const DuelShip *shooter, const DuelShip *target, float 
     return duel_v3_add(target->pos, duel_v3_scale(tgt_vel, t));
 }
 
-static void duel_ship_reset(DuelShip *s, DuelVec3 pos, DuelQuat orient, float hp) {
+static void duel_ship_reset(DuelShip *s, DuelVec3 pos, DuelQuat orient,
+                            float hp, int craft) {
     s->pos = pos;
     s->orient = duel_q_norm(orient);
     s->speed = 0.0f;
@@ -35,12 +36,19 @@ static void duel_ship_reset(DuelShip *s, DuelVec3 pos, DuelQuat orient, float hp
     s->fire_cd = 0.5f;
     s->alive = 1;
     s->muzzle = 0;
+    s->craft = craft;
+    s->shield_t = 0.0f;
 }
 
 void Duel_Init(DuelState *s) {
     memset(s, 0, sizeof(*s));
     s->diff = 1; /* M7: pilot = frozen baseline (reset preserves it) */
-    s->skirmish = DUEL_SKIRMISH_DEFAULT; /* M10: 3v3 battle */
+    /* M31: 3v3 by default (the frozen M5/M6/M9 battle). */
+    s->allies_n = DUEL_ALLIES_DEFAULT;
+    s->foes_n = DUEL_FOES_DEFAULT;
+    /* M28: the requested duel (X-Wing vs TIE Interceptor). */
+    s->craft_player = DUEL_CRAFT_XWING;
+    s->craft_enemy = DUEL_CRAFT_TIEIN;
     Duel_ResetCombat(s);
     s->time = 0.0f;
 }
@@ -78,21 +86,49 @@ void Duel_SetDifficulty(DuelState *s, int diff) {
     s->diff = diff;
 }
 
-void Duel_SetSkirmish(DuelState *s, int n) {
-    if (n < DUEL_SKIRMISH_MIN) n = DUEL_SKIRMISH_MIN;
-    if (n > DUEL_SKIRMISH_MAX) n = DUEL_SKIRMISH_MAX;
-    s->skirmish = n;
+void Duel_SetForces(DuelState *s, int allies, int foes) {
+    if (allies < DUEL_ALLIES_MIN) allies = DUEL_ALLIES_MIN;
+    if (allies > DUEL_ALLIES_MAX) allies = DUEL_ALLIES_MAX;
+    if (foes < DUEL_FOES_MIN) foes = DUEL_FOES_MIN;
+    if (foes > DUEL_FOES_MAX) foes = DUEL_FOES_MAX;
+    s->allies_n = allies;
+    s->foes_n = foes;
+}
+
+void Duel_SetCrafts(DuelState *s, int player_craft, int enemy_craft) {
+    if (player_craft < 0) player_craft = 0;
+    if (player_craft >= DUEL_CRAFT_COUNT) player_craft = DUEL_CRAFT_COUNT - 1;
+    if (enemy_craft < 0) enemy_craft = 0;
+    if (enemy_craft >= DUEL_CRAFT_COUNT) enemy_craft = DUEL_CRAFT_COUNT - 1;
+    s->craft_player = player_craft;
+    s->craft_enemy = enemy_craft;
+}
+
+float Duel_CraftHP(int craft) {
+    if (craft == DUEL_CRAFT_TIE) return DUEL_TIE_HP;
+    if (craft == DUEL_CRAFT_TIEIN) return DUEL_IN_HP;
+    return DUEL_PLAYER_HP;
+}
+
+float Duel_CraftRadius(int craft) {
+    if (craft == DUEL_CRAFT_TIE) return DUEL_TIE_RADIUS;
+    if (craft == DUEL_CRAFT_TIEIN) return DUEL_IN_RADIUS;
+    return DUEL_PLAYER_RADIUS;
 }
 
 int Duel_TiesWanted(const DuelState *s) {
-    int n = s ? s->skirmish : DUEL_SKIRMISH_DEFAULT;
-    if (n < DUEL_SKIRMISH_MIN) n = DUEL_SKIRMISH_MIN;
-    if (n > DUEL_SKIRMISH_MAX) n = DUEL_SKIRMISH_MAX;
+    int lo = (s && s->cruiser_mode) ? DUEL_FOES_MIN : 1;
+    int n = s ? s->foes_n : DUEL_FOES_DEFAULT;
+    if (n < lo) n = lo;
+    if (n > DUEL_FOES_MAX) n = DUEL_FOES_MAX;
     return n;
 }
 
 int Duel_AlliesWanted(const DuelState *s) {
-    return Duel_TiesWanted(s) - 1;
+    int n = s ? s->allies_n : DUEL_ALLIES_DEFAULT;
+    if (n < DUEL_ALLIES_MIN) n = DUEL_ALLIES_MIN;
+    if (n > DUEL_ALLIES_MAX) n = DUEL_ALLIES_MAX;
+    return n;
 }
 
 void Duel_SetHandDead(DuelState *s, float dead) {
@@ -110,7 +146,8 @@ void Duel_ResetCombat(DuelState *s) {
     float htv = s->hand_thr_value;
     int df = s->diff;
     float hd = s->hand_dead;
-    int sk = s->skirmish;
+    int al = s->allies_n, fo = s->foes_n;
+    int cpl = s->craft_player, cen = s->craft_enemy;
     memset(s, 0, sizeof(*s));
     s->kills_player = kp;
     s->kills_tie = kt;
@@ -120,11 +157,19 @@ void Duel_ResetCombat(DuelState *s) {
     /* M7: difficulty + hand deadzone survive resets (menu-owned). */
     s->diff = df;
     s->hand_dead = hd > 0.0f ? hd : DUEL_DEADZONE;
-    /* M10: battle size survives resets (menu-owned). */
-    s->skirmish = sk >= DUEL_SKIRMISH_MIN && sk <= DUEL_SKIRMISH_MAX ? sk
-        : DUEL_SKIRMISH_DEFAULT;
+    /* M31: forces survive resets (menu-owned). */
+    s->allies_n = (al >= DUEL_ALLIES_MIN && al <= DUEL_ALLIES_MAX) ? al
+        : DUEL_ALLIES_DEFAULT;
+    s->foes_n = (fo >= DUEL_FOES_MIN && fo <= DUEL_FOES_MAX) ? fo
+        : DUEL_FOES_DEFAULT;
+    /* M28: craft picks survive resets (menu-owned). */
+    s->craft_player = (cpl >= 0 && cpl < DUEL_CRAFT_COUNT) ? cpl
+        : DUEL_CRAFT_XWING;
+    s->craft_enemy = (cen >= 0 && cen < DUEL_CRAFT_COUNT) ? cen
+        : DUEL_CRAFT_TIEIN;
     s->phase = DUEL_PHASE_COMBAT;
-    duel_ship_reset(&s->player, duel_v3(0, 0, 0), duel_q_identity(), DUEL_PLAYER_HP);
+    duel_ship_reset(&s->player, duel_v3(0, 0, 0), duel_q_identity(),
+                    Duel_CraftHP(s->craft_player), s->craft_player);
     if (hta) s->player.throttle = duel_clampf(htv, 0.0f, 1.0f);
     /* M5: TIE formation ahead (loose vee, staggered), each facing the
      * player; allies echeloned on the player's flanks, facing forward.
@@ -152,7 +197,7 @@ void Duel_ResetCombat(DuelState *s) {
                                   -DUEL_SPAWN_TIE_FWD + toz[i]);
             duel_ship_reset(&s->ties[i], tp,
                             duel_face_quat(tp, duel_v3(0, 0, 0)),
-                            DUEL_TIE_HP * dhp);
+                            DUEL_TIE_HP * dhp, s->craft_enemy);
             if (i >= Duel_TiesWanted(s)) {
                 s->ties[i].alive = 0;
                 s->ties[i].hp = 0.0f;
@@ -161,7 +206,7 @@ void Duel_ResetCombat(DuelState *s) {
         for (i = 0; i < DUEL_ALLY_COUNT; i++) {
             duel_ship_reset(&s->allies[i],
                             duel_v3(aox[i], aoy[i], 190.0f + 60.0f * i),
-                            duel_q_identity(), DUEL_ALLY_HP);
+                            duel_q_identity(), DUEL_ALLY_HP, s->craft_player);
             if (i >= Duel_AlliesWanted(s)) {
                 s->allies[i].alive = 0;
                 s->allies[i].hp = 0.0f;
@@ -169,6 +214,21 @@ void Duel_ResetCombat(DuelState *s) {
         }
     }
     /* ai[]/ai_t[] zeroed by the memset above = ACQUIRE/0 for all. */
+}
+
+/* M34 CONTINUE?, M35 in place: the player wakes where they died
+ * (pose/speed/throttle kept) with full HP and 0.5 s gun grace:
+ * continue, not restart. Everyone and everything else untouched,
+ * back to COMBAT, hold released. */
+void Duel_RespawnPlayer(DuelState *s) {
+    s->player.hp = Duel_CraftHP(s->craft_player);
+    s->player.alive = 1;
+    s->player.fire_cd = 0.5f;
+    s->player.muzzle = 0;
+    s->player.shield_t = DUEL_RESPAWN_SHIELD_S;
+    s->phase = DUEL_PHASE_COMBAT;
+    s->phase_t = 0.0f;
+    s->result_hold = 0;
 }
 
 /* M5: orientation with -Z along (to - from), +Y up (basis-to-quat,
@@ -227,15 +287,26 @@ DuelVec3 Duel_MuzzleWorldAt(const DuelShip *sh, DuelShipKind owner,
     DuelVec3 up = duel_q_up(sh->orient);
     DuelVec3 off = duel_v3(0, 0, 0);
     float fwd_dist = 1.82f;
-    if (owner != DUEL_SHIP_TIE) { /* M5: allies fly the X-wing set */
+    /* M29: geometry strictly follows the airframe (the skirmish
+     * mirror puts X-Wings/Interceptors on AI rails; chin guns would
+     * float in the wrong place). */
+    int craft = sh->craft;
+    (void)owner;
+    if (craft == DUEL_CRAFT_TIE) {
+        float sx = (muzzle_index % 2 == 0) ? 0.35f : -0.35f;
+        off = duel_v3_add(duel_v3_scale(right, sx), duel_v3_scale(up, -0.80f));
+        fwd_dist = 1.5f;
+    } else if (craft == DUEL_CRAFT_TIEIN) {
+        int m = muzzle_index % 4;
+        float sx = (m == 0 || m == 2) ? DUEL_IN_MUZZ_X : -DUEL_IN_MUZZ_X;
+        float sy = (m < 2) ? DUEL_IN_MUZZ_Y : -DUEL_IN_MUZZ_Y;
+        off = duel_v3_add(duel_v3_scale(right, sx), duel_v3_scale(up, sy));
+        fwd_dist = DUEL_IN_MUZZ_FWD;
+    } else { /* M5: allies fly the X-wing set */
         static const float mx[4] = { 5.35f, -5.35f, 5.35f, -5.35f };
         static const float my[4] = { 1.30f, 1.30f, -1.30f, -1.30f };
         int m = muzzle_index % 4;
         off = duel_v3_add(duel_v3_scale(right, mx[m]), duel_v3_scale(up, my[m]));
-    } else {
-        float sx = (muzzle_index % 2 == 0) ? 0.35f : -0.35f;
-        off = duel_v3_add(duel_v3_scale(right, sx), duel_v3_scale(up, -0.80f));
-        fwd_dist = 1.5f;
     }
     return duel_v3_add(duel_v3_add(sh->pos, off), duel_v3_scale(fwd, fwd_dist));
 }
@@ -313,10 +384,26 @@ static int duel_fire(DuelState *s, DuelShipKind owner, int idx) {
 /* MP-A: shared human flight integrator. The local player (use_hands)
  * keeps the hand-lever overrides; the duel peer flies the same ship
  * on raw input only (its hands live on the other visor). */
+/* M33 stick response: rescale past the deadzone (no edge jump:
+ * the old hard cut leapt 0 -> dead*rate) then blend linear with
+ * cubic (expo). Odd-symmetric, 0 at center, +-1 at the stops. */
+float Duel_StickCurve(float x, float dead) {
+    float ax, t, s;
+    if (dead < 0.0f) dead = 0.0f;
+    if (dead > 0.9f) dead = 0.9f;
+    ax = fabsf(x);
+    if (ax <= dead) return 0.0f;
+    if (ax > 1.0f) ax = 1.0f;
+    s = x > 0.0f ? 1.0f : -1.0f;
+    t = (ax - dead) / (1.0f - dead);
+    return s * ((1.0f - DUEL_STICK_EXPO) * t + DUEL_STICK_EXPO * t * t * t);
+}
+
 static void duel_update_human(DuelState *s, DuelShip *p, const DuelInput *in,
                               DuelShipKind kind, int use_hands, float dt) {
     if (!p->alive) return;
     if (p->fire_cd > 0.0f) p->fire_cd -= dt;
+    if (p->shield_t > 0.0f) { p->shield_t -= dt; if (p->shield_t < 0.0f) p->shield_t = 0.0f; }
     /* Throttle: M3.2 hand lever owns it absolutely while held; otherwise
      * the lever integrates (M8: right-stick-Y lever). The integrator
      * resumes from the hand-set value: release never jumps. */
@@ -325,10 +412,24 @@ static void duel_update_human(DuelState *s, DuelShip *p, const DuelInput *in,
     } else if (in->thr_axis > DUEL_DEADZONE || in->thr_axis < -DUEL_DEADZONE) {
         p->throttle = duel_clampf(p->throttle + in->thr_axis * DUEL_THROTTLE_RATE * dt, 0.0f, 1.0f);
     }
-    float target = DUEL_PLAYER_MIN_SPEED +
-        (DUEL_PLAYER_MAX_SPEED - DUEL_PLAYER_MIN_SPEED) * p->throttle;
+    /* M28: the airframe sets the envelope (one shared human
+     * integrator: player and duel peer). X-Wing = legacy numbers. */
+    float min_spd = DUEL_PLAYER_MIN_SPEED, max_spd = DUEL_PLAYER_MAX_SPEED;
+    float accel = DUEL_PLAYER_ACCEL;
+    float pitch_rate = DUEL_PLAYER_PITCH_RATE, yaw_rate = DUEL_PLAYER_YAW_RATE;
+    float roll_rate = DUEL_PLAYER_ROLL_RATE;
+    if (p->craft == DUEL_CRAFT_TIEIN) {
+        min_spd = DUEL_IN_MIN_SPEED; max_spd = DUEL_IN_MAX_SPEED;
+        accel = DUEL_IN_ACCEL; pitch_rate = DUEL_IN_PITCH_RATE;
+        yaw_rate = DUEL_IN_YAW_RATE; roll_rate = DUEL_IN_ROLL_RATE;
+    } else if (p->craft == DUEL_CRAFT_TIE) {
+        min_spd = DUEL_TIE_MIN_SPEED; max_spd = DUEL_TIE_MAX_SPEED;
+        accel = DUEL_TIE_ACCEL; pitch_rate = DUEL_TIE_PITCH_RATE;
+        yaw_rate = DUEL_TIE_TURN_RATE; roll_rate = DUEL_TIE_ROLL_RATE;
+    }
+    float target = min_spd + (max_spd - min_spd) * p->throttle;
     float ds = target - p->speed;
-    float step = DUEL_PLAYER_ACCEL * dt;
+    float step = accel * dt;
     p->speed += ds > step ? step : (ds < -step ? -step : ds);
     /* Orientation: BODY-LOCAL (intrinsic). Convention is Hamilton with
      * v' = q v q*, so a delta must POST-multiply: (orient*dq) applies dq
@@ -336,23 +437,25 @@ static void duel_update_human(DuelState *s, DuelShip *p, const DuelInput *in,
      * pre-multiplied (qyaw*(qpitch*(qroll*orient))) = WORLD axes: correct
      * at identity, wrong after any maneuver (the wandering roll axis).
      * M8 mapping/signs unchanged: yaw=lx pitch=-ly roll=rx thr=ry. */
-    float pitch = fabsf(in->pitch) > DUEL_DEADZONE ? in->pitch : 0.0f;
-    float yaw = fabsf(in->yaw) > DUEL_DEADZONE ? in->yaw : 0.0f;
-    float roll = fabsf(in->roll) > DUEL_DEADZONE ? in->roll : 0.0f;
+    /* M33: every turn axis goes through the response curve (stick
+     * and hand levers alike): deadzone rescale + expo for fine aim. */
+    float pitch = Duel_StickCurve(in->pitch, DUEL_DEADZONE);
+    float yaw = Duel_StickCurve(in->yaw, DUEL_DEADZONE);
+    float roll = Duel_StickCurve(in->roll, DUEL_DEADZONE);
     /* M6 axis split (user order): the right lever owns pitch + PURE
      * yaw (stick axes ignored while held); the left lever owns roll.
      * No bank coordination: yaw and roll are independent. Each hand
      * overrides only its own axes, so both levers work together. */
     if (use_hands && s->hand_stk_active) {
-        pitch = fabsf(s->hand_pitch) > s->hand_dead ? s->hand_pitch : 0.0f;
-        yaw = fabsf(s->hand_yaw) > s->hand_dead ? s->hand_yaw : 0.0f;
+        pitch = Duel_StickCurve(s->hand_pitch, s->hand_dead);
+        yaw = Duel_StickCurve(s->hand_yaw, s->hand_dead);
     }
     if (use_hands && s->hand_lev_active) {
-        roll = fabsf(s->hand_lev_roll) > s->hand_dead ? s->hand_lev_roll : 0.0f;
+        roll = Duel_StickCurve(s->hand_lev_roll, s->hand_dead);
     }
-    DuelQuat qyaw = duel_q_axis_angle(duel_v3(0, 1, 0), -yaw * DUEL_PLAYER_YAW_RATE * dt);
-    DuelQuat qpitch = duel_q_axis_angle(duel_v3(1, 0, 0), pitch * DUEL_PLAYER_PITCH_RATE * dt);
-    DuelQuat qroll = duel_q_axis_angle(duel_v3(0, 0, 1), -roll * DUEL_PLAYER_ROLL_RATE * dt);
+    DuelQuat qyaw = duel_q_axis_angle(duel_v3(0, 1, 0), -yaw * yaw_rate * dt);
+    DuelQuat qpitch = duel_q_axis_angle(duel_v3(1, 0, 0), pitch * pitch_rate * dt);
+    DuelQuat qroll = duel_q_axis_angle(duel_v3(0, 0, 1), -roll * roll_rate * dt);
     DuelQuat dq = duel_q_mul(qyaw, duel_q_mul(qpitch, qroll));
     p->orient = duel_q_norm(duel_q_mul(p->orient, dq));
     p->pos = duel_v3_add(p->pos, duel_v3_scale(duel_q_forward(p->orient), p->speed * dt));
@@ -548,7 +651,26 @@ static void duel_update_ally(DuelState *s, int idx, float dt) {
     float facing;
     if (!a->alive) return;
     if (a->fire_cd > 0.0f) a->fire_cd -= dt;
+    /* M31: escorts first (dogfight), the ISD when the sky is clear.
+     * Long gate: the hull fills the lane before the center is close. */
     ti = duel_nearest_tie_at(s, a->pos);
+    if (s->cruiser_mode && s->cruiser.alive && ti < 0) {
+        goal = s->cruiser.pos;
+        to = duel_v3_sub(goal, a->pos);
+        dist = duel_v3_len(to);
+        dir = dist > 1e-3f ? duel_v3_scale(to, 1.0f / dist)
+                           : duel_q_forward(a->orient);
+        side = duel_v3_norm(duel_v3_cross(dir, duel_v3(0, 1, 0)));
+        wob = sinf(s->time * 1.1f + (float)idx * 2.7f) * 0.10f;
+        a->throttle = dist > 900.0f ? 1.0f : 0.6f;
+        a->orient = Duel_SteerToward(a->orient,
+            duel_v3_add(dir, duel_v3_scale(side, wob)),
+            DUEL_ALLY_TURN_RATE, dt);
+        facing = duel_v3_dot(duel_v3_norm(duel_q_forward(a->orient)), dir);
+        if (facing > DUEL_TIE_FIRE_CONE_DOT && dist < DUEL_CRUISER_FIRE_RANGE)
+            duel_fire(s, DUEL_SHIP_ALLY, idx);
+        ti = -2; /* skip both legacy branches below */
+    }
     if (ti >= 0) {
         goal = s->ties[ti].pos;
         to = duel_v3_sub(goal, a->pos);
@@ -564,8 +686,9 @@ static void duel_update_ally(DuelState *s, int idx, float dt) {
         facing = duel_v3_dot(duel_v3_norm(duel_q_forward(a->orient)), dir);
         if (facing > DUEL_TIE_FIRE_CONE_DOT && dist < DUEL_TIE_FIRE_RANGE)
             duel_fire(s, DUEL_SHIP_ALLY, idx);
-    } else {
-        /* Wave cleared: tuck onto the player's wing. */
+    } else if (ti == -1) {
+        /* Wave cleared: tuck onto the player's wing. (-2 = M30 cruiser
+         * branch above already steered this frame.) */
         goal = duel_v3_add(s->player.pos, duel_v3(idx == 0 ? -60.0f : 60.0f,
                                                  15.0f, 80.0f));
         to = duel_v3_sub(goal, a->pos);
@@ -609,6 +732,200 @@ static void duel_damage(DuelShip *target, float dmg) {
     }
 }
 
+/* M30 cruiser tables (SHIP frame; measured from StarDestroyer.gltf
+ * accessors, evidence/m30-cruiser; OPT x/z negated via R_y(PI)).
+ * Spheres over-cover ~15%: misses become hits, never through-hull. */
+static const DuelVec3 kCruiserSph[DUEL_CRUISER_SPHERES] = {
+    { 0.0f, 0.0f, -700.0f },   /* bow */
+    { 0.0f, 0.0f, -350.0f },   /* fwd hull */
+    { 0.0f, 20.0f, 50.0f },    /* mid hull */
+    { -230.0f, 0.0f, 420.0f }, /* aft port */
+    { 230.0f, 0.0f, 420.0f },  /* aft starboard */
+    { 0.0f, 250.0f, 565.0f },  /* bridge tower */
+};
+/* M30: hull sphere radii (render needs them for hit-burst placement). */
+const float DUEL_CRUISER_SPH_R[DUEL_CRUISER_SPHERES] =
+    { 170.0f, 250.0f, 320.0f, 300.0f, 300.0f, 170.0f };
+static const DuelVec3 kCruiserTur[DUEL_CRUISER_TURRETS] = {
+    { 234.0f, 41.0f, 295.0f }, { -234.0f, 41.0f, 295.0f },
+    { 234.0f, 45.0f, 348.0f }, { -234.0f, 45.0f, 348.0f },
+    { 234.0f, 49.0f, 401.0f }, { -234.0f, 49.0f, 401.0f },
+    { 234.0f, 53.0f, 454.0f }, { -234.0f, 53.0f, 454.0f },
+    { 8.8f, 1.9f, -819.0f }, { -8.8f, 1.9f, -819.0f },
+};
+/* M32: subsystem offsets (turrets 0..9 = kCruiserTur, domes 10..11,
+ * bridge 12) + hit radii. Domes (±106, 293, 517) and bridge neck
+ * (0, 270, 540) measured from the glTF (Mesh34/35, Mesh24/67). */
+static const DuelVec3 kCruiserSub[DUEL_CRUISER_SUBS] = {
+    { 234.0f, 41.0f, 295.0f }, { -234.0f, 41.0f, 295.0f },
+    { 234.0f, 45.0f, 348.0f }, { -234.0f, 45.0f, 348.0f },
+    { 234.0f, 49.0f, 401.0f }, { -234.0f, 49.0f, 401.0f },
+    { 234.0f, 53.0f, 454.0f }, { -234.0f, 53.0f, 454.0f },
+    { 8.8f, 1.9f, -819.0f }, { -8.8f, 1.9f, -819.0f },
+    { 106.0f, 293.0f, 517.0f }, { -106.0f, 293.0f, 517.0f },
+    { 0.0f, 270.0f, 540.0f },
+};
+static const float kCruiserSubR[DUEL_CRUISER_SUBS] = {
+    DUEL_CRUISER_TURRET_R, DUEL_CRUISER_TURRET_R, DUEL_CRUISER_TURRET_R,
+    DUEL_CRUISER_TURRET_R, DUEL_CRUISER_TURRET_R, DUEL_CRUISER_TURRET_R,
+    DUEL_CRUISER_TURRET_R, DUEL_CRUISER_TURRET_R, DUEL_CRUISER_TURRET_R,
+    DUEL_CRUISER_TURRET_R, DUEL_CRUISER_DOME_R, DUEL_CRUISER_DOME_R,
+    DUEL_CRUISER_BRIDGE_R,
+};
+
+DuelVec3 Duel_CruiserSubPos(const DuelState *s, int i) {
+    if (i < 0) i = 0;
+    if (i >= DUEL_CRUISER_SUBS) i = DUEL_CRUISER_SUBS - 1;
+    return duel_v3_add(s->cruiser.pos,
+                       duel_q_rot(s->cruiser.orient, kCruiserSub[i]));
+}
+
+float Duel_CruiserSubMaxHP(int i) {
+    if (i == DUEL_CRUISER_SUB_BRIDGE) return DUEL_CRUISER_BRIDGE_HP;
+    if (i >= DUEL_CRUISER_SUB_DOME0) return DUEL_CRUISER_DOME_HP;
+    return DUEL_CRUISER_TURRET_HP;
+}
+
+/* M32: each dead dome drops the shields a notch (hull takes +50%). */
+static float duel_shield_mult(const DuelState *s) {
+    float m = 1.0f;
+    if (s->cruiser.sub_hp[DUEL_CRUISER_SUB_DOME0] <= 0.0f) m += 0.5f;
+    if (s->cruiser.sub_hp[DUEL_CRUISER_SUB_DOME1] <= 0.0f) m += 0.5f;
+    return m;
+}
+
+static void duel_cruiser_damage(DuelState *s, float dmg) {
+    s->cruiser.hp -= dmg;
+    if (s->cruiser.hp <= 0.0f) {
+        s->cruiser.hp = 0.0f;
+        s->cruiser.alive = 0;
+    }
+}
+
+/* M30: one turret volley per cooldown at the nearest rebel (lead +
+ * deterministic wobble). Imperial team (TIE branch, TIE damage). */
+static void duel_cruiser_volley(DuelState *s, float dt) {
+    DuelCruiser *c = &s->cruiser;
+    const DuelShip *tgt;
+    DuelVec3 tp;
+    DuelVec3 to;
+    float dist, tm;
+    DuelVec3 aim, dir, side, up;
+    float wob;
+    int i;
+    if (!c->alive) return;
+    if (s->cruiser.sub_hp[DUEL_CRUISER_SUB_BRIDGE] <= 0.0f) return;
+    if (c->fire_cd > 0.0f) { c->fire_cd -= dt; return; }
+    /* M37: the guns respect difficulty (rookie guns MISS: wide wobble +
+     * slow volleys; ace guns tighten up). Pilot = legacy numbers. */
+    {
+        float dhp, dsp, dtn, dcd;
+        duel_diff_mults(s->diff, &dhp, &dsp, &dtn, &dcd);
+        (void)dhp; (void)dsp; (void)dtn; /* volley rate only */
+        c->fire_cd = DUEL_CRUISER_VOLLEY_CD * dcd;
+    }
+    /* M32: dead turrets are skipped in the rotation. */
+    i = -1;
+    {
+        int n;
+        for (n = 0; n < DUEL_CRUISER_TURRETS; n++) {
+            int t = c->turret_next++ % DUEL_CRUISER_TURRETS;
+            if (c->sub_hp[t] > 0.0f) { i = t; break; }
+        }
+    }
+    if (i < 0) return; /* all guns dead */
+    tp = duel_v3_add(c->pos, duel_q_rot(c->orient, kCruiserTur[i]));
+    tgt = duel_nearest_rebel(s, tp);
+    if (!tgt) return;
+    to = duel_v3_sub(tgt->pos, tp);
+    dist = duel_v3_len(to);
+    if (dist < 1.0f) return;
+    tm = dist / DUEL_CRUISER_BOLT_SPEED;
+    aim = duel_v3_add(tgt->pos,
+        duel_v3_scale(duel_q_forward(tgt->orient), tgt->speed * tm));
+    dir = duel_v3_norm(duel_v3_sub(aim, tp));
+    side = duel_v3_norm(duel_v3_cross(dir, duel_v3(0, 1, 0)));
+    up = duel_v3_cross(side, dir);
+    /* M37 wobble obedience: rookie x2.0 (sprays), ace x0.6 (snipes). */
+    {
+        float wob_m = s->diff <= 0 ? 2.0f : s->diff >= 2 ? 0.6f : 1.0f;
+        wob = (sinf(s->time * 1.7f + (float)i * 2.4f) * 0.02f
+            + sinf(s->time * 3.1f + (float)i * 1.1f) * 0.01f) * wob_m;
+    }
+    dir = duel_v3_norm(duel_v3_add(dir,
+        duel_v3_add(duel_v3_scale(side, wob), duel_v3_scale(up, wob * 0.6f))));
+    for (i = 0; i < DUEL_LASER_POOL; i++) {
+        if (s->lasers[i].active) continue;
+        s->lasers[i].active = 1;
+        s->lasers[i].owner = DUEL_SHIP_TIE;
+        s->lasers[i].pos = tp;
+        s->lasers[i].vel = duel_v3_scale(dir, DUEL_CRUISER_BOLT_SPEED);
+        s->lasers[i].life = DUEL_CRUISER_BOLT_LIFE;
+        break;
+    }
+}
+
+/* M30: hull scrape (overlap a sphere: burn + slow). M31: escorts
+ * scrape too (same hazard for everyone near the hull). */
+static void duel_cruiser_ram_one(DuelShip *sh, DuelState *s, float dt) {
+    int i;
+    if (!sh->alive) return;
+    for (i = 0; i < DUEL_CRUISER_SPHERES; i++) {
+        float d = duel_v3_len(duel_v3_sub(sh->pos, s->cruiser.sph[i]));
+        if (d < DUEL_CRUISER_SPH_R[i]) {
+            /* M36: shield skips the burn (the slow always applies). */
+            if (sh->shield_t <= 0.0f)
+                duel_damage(sh, DUEL_CRUISER_RAM_DPS * dt);
+            if (sh->speed > 40.0f) sh->speed = 40.0f;
+            break;
+        }
+    }
+}
+
+static void duel_cruiser_ram(DuelState *s, float dt) {
+    int k;
+    if (!s->cruiser.alive) return;
+    duel_cruiser_ram_one(&s->player, s, dt);
+    for (k = 0; k < DUEL_ALLY_COUNT; k++)
+        duel_cruiser_ram_one(&s->allies[k], s, dt);
+    for (k = 0; k < DUEL_TIE_COUNT; k++)
+        duel_cruiser_ram_one(&s->ties[k], s, dt);
+}
+
+/* M32: which live sub (if any) ate a bolt that just hit hull.
+ * Rebuilds the full path from the spawn (rebel bolts share one
+ * speed/lifetime) and takes the nearest live sub the flight LINE
+ * threads within its radius (unclamped projection: the mount sits
+ * past the impact), provided the impact is near the mount (embed
+ * depth peaks ~168 m at the trench turrets; 200 keeps far-side
+ * hull hits on the hull). -1 = clean hull hit. */
+static int duel_cruiser_sub_redirect(const DuelState *s, const DuelLaser *l) {
+    DuelVec3 spawn, seg, to_t, closest, d, sp;
+    float seg_len2, flown, best = 1e30f;
+    int bi, best_i = -1;
+    flown = DUEL_LASER_LIFETIME - l->life;
+    if (flown < 0.0f) flown = 0.0f;
+    spawn = duel_v3_sub(l->pos, duel_v3_scale(l->vel, flown));
+    seg = duel_v3_sub(l->pos, spawn);
+    seg_len2 = duel_v3_dot(seg, seg);
+    if (seg_len2 < 1e-6f) return -1;
+    for (bi = 0; bi < DUEL_CRUISER_SUBS; bi++) {
+        float t, dp2, rr;
+        if (s->cruiser.sub_hp[bi] <= 0.0f) continue;
+        sp = Duel_CruiserSubPos(s, bi);
+        if (duel_v3_len(duel_v3_sub(sp, l->pos)) > 200.0f) continue;
+        to_t = duel_v3_sub(sp, spawn);
+        t = duel_v3_dot(to_t, seg) / seg_len2;
+        if (t < 0.0f) continue; /* mount behind the muzzle */
+        closest = duel_v3_add(spawn, duel_v3_scale(seg, t));
+        d = duel_v3_sub(closest, sp);
+        dp2 = duel_v3_dot(d, d);
+        rr = kCruiserSubR[bi] + DUEL_LASER_RADIUS;
+        if (dp2 < rr * rr && dp2 < best) { best = dp2; best_i = bi; }
+    }
+    return best_i;
+}
+
 static void duel_update_lasers(DuelState *s, float dt) {
     for (int i = 0; i < DUEL_LASER_POOL; i++) {
         DuelLaser *l = &s->lasers[i];
@@ -629,9 +946,11 @@ static void duel_update_lasers(DuelState *s, float dt) {
             float dmg = l->owner == DUEL_SHIP_TIE ? DUEL_TIE_LASER_DAMAGE
                                                   : DUEL_PLAYER_LASER_DAMAGE;
             if (s->player.alive && duel_swept_hit(prev, l->pos, s->player.pos,
-                    DUEL_PLAYER_RADIUS + DUEL_LASER_RADIUS)) {
+                    Duel_CraftRadius(s->player.craft) + DUEL_LASER_RADIUS)) {
                 l->active = 0;
-                duel_damage(&s->player, dmg);
+                /* M36: shielded respawn fizzles bolts (no damage). */
+                if (s->player.shield_t <= 0.0f)
+                    duel_damage(&s->player, dmg);
                 continue;
             }
             for (k = 0; k < DUEL_ALLY_COUNT; k++) {
@@ -656,9 +975,49 @@ static void duel_update_lasers(DuelState *s, float dt) {
                 }
             }
             if (l->active && s->peer.alive && duel_swept_hit(prev, l->pos,
-                    s->peer.pos, DUEL_PLAYER_RADIUS + DUEL_LASER_RADIUS)) {
+                    s->peer.pos, Duel_CraftRadius(s->peer.craft) + DUEL_LASER_RADIUS)) {
                 l->active = 0;
                 duel_damage(&s->peer, dmg);
+            }
+            /* M32: rebel bolts vs subsystems first, hull after. */
+            if (l->active && s->cruiser_mode && s->cruiser.alive) {
+                int bi;
+                for (bi = 0; bi < DUEL_CRUISER_SUBS; bi++) {
+                    DuelVec3 sp;
+                    if (s->cruiser.sub_hp[bi] <= 0.0f) continue;
+                    sp = Duel_CruiserSubPos(s, bi);
+                    if (duel_swept_hit(prev, l->pos, sp,
+                            kCruiserSubR[bi] + DUEL_LASER_RADIUS)) {
+                        l->active = 0;
+                        s->cruiser.sub_hp[bi] -= dmg;
+                        if (s->cruiser.sub_hp[bi] < 0.0f)
+                            s->cruiser.sub_hp[bi] = 0.0f;
+                        break;
+                    }
+                }
+            }
+            /* M30: rebel bolts vs the cruiser hull spheres. M32: the
+             * spheres over-cover ~15%, so every mount sits inside one
+             * (bow turret: 119 m deep in a r170 sphere) and a bolt
+             * aimed at a live sub crosses hull first: redirect it to
+             * the mount when the full path says the sub ate it. */
+            if (l->active && s->cruiser_mode && s->cruiser.alive) {
+                for (k = 0; k < DUEL_CRUISER_SPHERES; k++) {
+                    if (duel_swept_hit(prev, l->pos, s->cruiser.sph[k],
+                            DUEL_CRUISER_SPH_R[k] + DUEL_LASER_RADIUS)) {
+                        int bi = duel_cruiser_sub_redirect(s, l);
+                        l->active = 0;
+                        if (bi >= 0) {
+                            s->cruiser.sub_hp[bi] -= dmg;
+                            if (s->cruiser.sub_hp[bi] < 0.0f)
+                                s->cruiser.sub_hp[bi] = 0.0f;
+                        } else {
+                            duel_cruiser_damage(s,
+                                dmg * duel_shield_mult(s));
+                        }
+                        break;
+                    }
+                }
             }
         }
     }
@@ -693,7 +1052,9 @@ void Duel_Update(DuelState *s, const DuelInput *in, float dt) {
         for (k = 0; k < DUEL_TIE_COUNT; k++) duel_update_tie(s, k, dt);
         for (k = 0; k < DUEL_ALLY_COUNT; k++) duel_update_ally(s, k, dt);
         duel_update_lasers(s, dt);
-        if (s->phase_t >= DUEL_RESET_DELAY) Duel_ResetCombat(s);
+        /* M34: defeat holds the wreck (CONTINUE? behind RESULT). */
+        if (s->phase_t >= DUEL_RESET_DELAY && !s->result_hold)
+            Duel_ResetCombat(s);
     }
 }
 
@@ -716,7 +1077,70 @@ void Duel_ResetDuel(DuelState *s) {
     }
     pp = duel_v3(0.0f, 0.0f, -DUEL_SPAWN_TIE_FWD);
     duel_ship_reset(&s->peer, pp, duel_face_quat(pp, duel_v3(0, 0, 0)),
-                    DUEL_PLAYER_HP);
+                    Duel_CraftHP(s->craft_enemy), s->craft_enemy);
+}
+
+/* M30 cruiser battle: same combat reset (rebel spawns + setup picks),
+ * then the AI furball is parked, 2 wingmen stay, and the ISD spawns
+ * ahead, bow toward the player. Hull spheres precomputed (static). */
+void Duel_ResetCruiser(DuelState *s) {
+    int i;
+    Duel_ResetCombat(s);
+    s->cruiser_mode = 1;
+    s->duel_mode = 0;
+    s->duel_winner = 0;
+    /* M31: escorts + wingmen from the force picks (0 foes = guns-only). */
+    for (i = Duel_TiesWanted(s); i < DUEL_TIE_COUNT; i++) {
+        s->ties[i].alive = 0;
+        s->ties[i].hp = 0.0f;
+    }
+    for (i = Duel_AlliesWanted(s); i < DUEL_ALLY_COUNT; i++) {
+        s->allies[i].alive = 0;
+        s->allies[i].hp = 0.0f;
+    }
+    s->cruiser.pos = duel_v3(0.0f, 0.0f, -DUEL_CRUISER_SPAWN_FWD);
+    s->cruiser.orient = duel_q(0.0f, 1.0f, 0.0f, 0.0f); /* R_y(PI) */
+    s->cruiser.hp = DUEL_CRUISER_HP;
+    s->cruiser.alive = 1;
+    s->cruiser.fire_cd = 1.0f; /* first-volley grace */
+    s->cruiser.turret_next = 0;
+    for (i = 0; i < DUEL_CRUISER_SUBS; i++)
+        s->cruiser.sub_hp[i] = Duel_CruiserSubMaxHP(i);
+    for (i = 0; i < DUEL_CRUISER_SPHERES; i++)
+        s->cruiser.sph[i] = duel_v3_add(s->cruiser.pos,
+            duel_q_rot(s->cruiser.orient, kCruiserSph[i]));
+}
+
+void Duel_UpdateCruiser(DuelState *s, const DuelInput *in, float dt) {
+    if (dt <= 0.0f) return;
+    if (dt > 0.1f) dt = 0.1f; /* clamp tab-switch spikes */
+    s->time += dt;
+    s->phase_t += dt;
+    if (s->phase == DUEL_PHASE_COMBAT) {
+        int k;
+        duel_update_player(s, in, dt);
+        for (k = 0; k < DUEL_ALLY_COUNT; k++) duel_update_ally(s, k, dt);
+        duel_cruiser_volley(s, dt);
+        duel_update_lasers(s, dt);
+        duel_cruiser_ram(s, dt);
+        if (!s->player.alive || !s->cruiser.alive) {
+            s->phase = DUEL_PHASE_DESTROYED;
+            s->phase_t = 0.0f;
+            if (!s->cruiser.alive && s->player.alive) s->kills_player++;
+            if (!s->player.alive && s->cruiser.alive) s->kills_tie++;
+        }
+    } else {
+        /* Destroyed: drift the survivors; the guns fall silent. */
+        DuelInput empty;
+        int k;
+        memset(&empty, 0, sizeof(empty));
+        duel_update_player(s, &empty, dt);
+        for (k = 0; k < DUEL_ALLY_COUNT; k++) duel_update_ally(s, k, dt);
+        duel_update_lasers(s, dt);
+        /* M34: defeat holds the wreck (CONTINUE? behind RESULT). */
+        if (s->phase_t >= DUEL_RESET_DELAY && !s->result_hold)
+            Duel_ResetCruiser(s);
+    }
 }
 
 /* MP-A: two-human step. No AI, no auto-reset: on death the phase

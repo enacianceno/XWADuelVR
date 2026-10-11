@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "duel_audio.h"
+#include "duel_env.h" /* M27: random scene per match */
 #include "duel_input.h"
 #include "duel_math.h"
 #include "duel_menu.h"
@@ -125,6 +126,7 @@ int SDL_main(int argc, char **argv) {
     int running = 1;
     /* M7 menu/combat state machine edges + placement. */
     int prev_menu_btn = 0, prev_fire = 0, prev_press = 0;
+    int prev_abtn = 0, prev_bbtn = 0; /* M35 A/B edges */
     int nav_y = 0, nav_x = 0;
     int panel_state = -1;
     int panel_cal_gen = 0; /* M9: cal gen at panel placement (boot fix) */
@@ -134,6 +136,7 @@ int SDL_main(int argc, char **argv) {
     int was_focus = 1;
     int prev_phase = DUEL_PHASE_COMBAT;
     int combat_kills0 = 0;
+    int defeat_hold = 0; /* M34: 1 while a lost battle waits on CONTINUE? */
     while (running && !DuelXr_ShouldQuit()) {
         DuelXr_PollEvents();
         SDL_Event ev;
@@ -168,6 +171,7 @@ int SDL_main(int argc, char **argv) {
             if (dt < 0.0f) dt = 0.0f;
             if (dt > 0.1f) dt = 0.1f;
             DuelInput in;
+            DuelInput_SetLeftHanded(menu.hand_left);
             DuelInput_Poll(&in, dt, display_time);
             /* M7 options shape the flight axes (menu nav uses raw_*). */
             in.yaw = duel_shape_axis(in.yaw, menu.dead, menu.sens);
@@ -178,6 +182,8 @@ int SDL_main(int argc, char **argv) {
             DuelRender_SetHandSens(render, menu.sens);
             int menu_edge = in.menu && !prev_menu_btn; prev_menu_btn = in.menu;
             int fire_edge = in.fire && !prev_fire; prev_fire = in.fire;
+            int abtn_edge = in.btn_a && !prev_abtn; prev_abtn = in.btn_a;
+            int bbtn_edge = in.btn_b && !prev_bbtn; prev_bbtn = in.btn_b;
             /* M7 menu screens: panel placement (once per screen,
              * world-locked) + panel touch + controller fallback. */
             if (menu.state != DUEL_APP_COMBAT) {
@@ -265,7 +271,8 @@ int SDL_main(int argc, char **argv) {
                         if (nx && nx != nav_x) DuelMenu_Adjust(&menu, nx);
                         nav_y = ny;
                         nav_x = nx;
-                        if ((fire_edge || menu_edge) && click_row < 0)
+                        if ((fire_edge || menu_edge || abtn_edge) &&
+                                click_row < 0)
                             click_row = DuelMenu_Highlighted(&menu);
                     }
                     if (click_row >= 0) {
@@ -275,6 +282,14 @@ int SDL_main(int argc, char **argv) {
                         /* M9 repro log: every menu activation on one line. */
                         SDL_Log("DUEL menu click screen=%d row=%d act=%d",
                                 (int)menu.state, click_row, (int)act);
+                    }
+                    /* M35 B = back (XWAQuestVR parity): pause cancels to
+                     * resume, anywhere else steps out (RESULT B = no). */
+                    if (bbtn_edge && act == DUEL_ACT_NONE) {
+                        if (menu.state == DUEL_APP_PAUSED)
+                            act = DUEL_ACT_RESUME;
+                        else if (menu.state != DUEL_APP_MENU)
+                            act = DUEL_ACT_BACK;
                     }
                     switch (act) {
                     case DUEL_ACT_ENTER_BRIEF:
@@ -297,8 +312,12 @@ int SDL_main(int argc, char **argv) {
                         /* M10: size + difficulty BEFORE the reset (spawn
                          * counts/HP use the menu values, not stale ones). */
                         Duel_SetDifficulty(&sim, menu.difficulty);
-                        Duel_SetSkirmish(&sim, menu.skirmish);
-                        if (menu.duel_mode) {
+                        Duel_SetForces(&sim, menu.allies_n, menu.foes_n);
+                        Duel_SetCrafts(&sim, menu.craft_player,
+                                       menu.craft_enemy);
+                        if (menu.duel_mode == 2) {
+                            Duel_ResetCruiser(&sim); /* M30: offline */
+                        } else if (menu.duel_mode) {
                             Duel_ResetDuel(&sim);
                             if (!duel_net_ok) {
                                 duel_net_ok = DuelNet_Open(&duel_net,
@@ -328,14 +347,22 @@ int SDL_main(int argc, char **argv) {
                                 menu.series_won = 0;
                             }
                         }
+                        /* M27: fresh scene every match/round (arena +
+                         * 2 site nebulas). Tick seed: no two taps
+                         * start under the same sky. */
+                        DuelRender_SetEnv(render, DuelEnv_Pick(
+                            (unsigned)(SDL_GetTicksNS() / 1000u) +
+                            (unsigned)menu.series_round * 7919u));
                         DuelRender_ClearGrabs(render);
                         DuelMenu_SetState(&menu, DUEL_APP_COMBAT);
                         DuelRender_SetMenuPanel(render, 0, NULL,
                             duel_v3(0, 0, 0), duel_q_identity());
+                        DuelRender_SetCombatHud(render, 1);
                         panel_state = -1;
                         combat_kills0 = sim.kills_player;
                         need_fire_release = 1;
                         prev_phase = DUEL_PHASE_COMBAT;
+                        defeat_hold = 0;
                         SDL_Log("DUEL combat start diff=%d size=%dv%d pilot=%s round=%d/%d won=%d",
                                 menu.difficulty, Duel_TiesWanted(&sim),
                                 Duel_TiesWanted(&sim), menu.pilot.name,
@@ -348,8 +375,24 @@ int SDL_main(int argc, char **argv) {
                             duel_v3(0, 0, 0), duel_q_identity());
                         panel_state = -1;
                         DuelRender_ClearGrabs(render);
+                        DuelRender_SetCombatHud(render, 1);
                         need_fire_release = 1;
                         SDL_Log("DUEL resume");
+                        break;
+                    case DUEL_ACT_CONTINUE:
+                        /* M34 CONTINUE?: same battle, fresh player (kills
+                         * keep accumulating: combat_kills0 untouched). */
+                        Duel_RespawnPlayer(&sim);
+                        defeat_hold = 0;
+                        DuelMenu_SetState(&menu, DUEL_APP_COMBAT);
+                        DuelRender_SetMenuPanel(render, 0, NULL,
+                            duel_v3(0, 0, 0), duel_q_identity());
+                        panel_state = -1;
+                        DuelRender_ClearGrabs(render);
+                        DuelRender_SetCombatHud(render, 1);
+                        need_fire_release = 1;
+                        prev_phase = DUEL_PHASE_COMBAT;
+                        SDL_Log("DUEL continue: respawn into the held battle");
                         break;
                     case DUEL_ACT_QUIT_TO_MENU:
                         DuelMenu_SetState(&menu, DUEL_APP_MENU);
@@ -522,6 +565,8 @@ int SDL_main(int argc, char **argv) {
                     memset(&neutral, 0, sizeof(neutral));
                     if (sim.duel_mode)
                         Duel_UpdateDuel(&sim, &neutral, &neutral, dt);
+                    else if (sim.cruiser_mode)
+                        Duel_UpdateCruiser(&sim, &neutral, dt);
                     else
                         Duel_Update(&sim, &neutral, dt);
                 } else if (sim.duel_mode) {
@@ -538,6 +583,8 @@ int SDL_main(int argc, char **argv) {
                         }
                     }
                     Duel_UpdateDuel(&sim, &in, &net_in, dt);
+                } else if (sim.cruiser_mode) {
+                    Duel_UpdateCruiser(&sim, &in, dt);
                 } else {
                     Duel_Update(&sim, &in, dt);
                 }
@@ -569,10 +616,42 @@ int SDL_main(int argc, char **argv) {
                                            DUEL_NET_DRONE_PORT);
                     }
                 }
+                /* M34: death edge with the player dead freezes the
+                 * lost battle (no auto-reset) for the CONTINUE?
+                 * screen; the reset edge below then only sees wins. */
+                if (!sim.duel_mode && !defeat_hold &&
+                        prev_phase == DUEL_PHASE_COMBAT &&
+                        sim.phase == DUEL_PHASE_DESTROYED &&
+                        !sim.player.alive) {
+                    defeat_hold = 1;
+                    sim.result_hold = 1;
+                }
+                /* M34: defeat RESULT after the death beat (battle held,
+                 * stepping stops on RESULT so this fires once). */
+                if (!sim.duel_mode && defeat_hold &&
+                        sim.phase == DUEL_PHASE_DESTROYED &&
+                        sim.phase_t >= DUEL_RESET_DELAY &&
+                        menu.state != DUEL_APP_RESULT) {
+                    int kills = sim.kills_player - combat_kills0;
+                    menu.result_win = 0;
+                    menu.result_kills = kills < 0 ? 0 : kills;
+                    if (menu.pilot_idx >= 0) {
+                        DuelPilot_Record(&menu.pilot, 0,
+                                         menu.result_kills, menu.difficulty);
+                        DuelPilot_Save(&menu.pilot, prof_dir);
+                        DuelMenu_RefreshPilots(&menu);
+                    }
+                    DuelMenu_SetState(&menu, DUEL_APP_RESULT);
+                    DuelRender_ClearGrabs(render);
+                    SDL_Log("DUEL defeat: CONTINUAR? kills=%d pilot=%s",
+                            menu.result_kills, menu.pilot.name);
+                }
                 /* Sim auto-reset rebuilt the fight: freeze it, record
                  * the result ONCE, show the RESULT screen. */
                 if (!sim.duel_mode && prev_phase == DUEL_PHASE_DESTROYED &&
                         sim.phase == DUEL_PHASE_COMBAT) {
+                    /* M34: defeat diverts to CONTINUE? above, so this
+                     * edge only fires on wins (post-reset alive). */
                     int win = sim.player.alive ? 1 : 0;
                     int kills = sim.kills_player - combat_kills0;
                     menu.result_win = win;
@@ -646,6 +725,11 @@ int SDL_main(int argc, char **argv) {
             DuelRender_Update(render, &sim, dt);
             DuelRender_Calibrate(render, &sim, &views[0].pose, &views[1].pose, have_views);
             DuelRender_HandsLocate(render, display_time); /* M3.0: once per frame */
+            /* M35: controller aim for the menu ray (0 left / 1 right). */
+            DuelRender_ControllerAim(render, 0, in.aim_pos[0],
+                                     in.aim_quat[0], in.aim_valid[0]);
+            DuelRender_ControllerAim(render, 1, in.aim_pos[1],
+                                     in.aim_quat[1], in.aim_valid[1]);
             XrPosef poses[DUEL_EYE_COUNT];
             XrFovf fovs[DUEL_EYE_COUNT];
             int eyes_ok = 1;

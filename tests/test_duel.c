@@ -8,6 +8,7 @@
 
 #include "duel_audio.h"
 #include "duel_depth.h"
+#include "duel_env.h"
 #include "duel_font.h"
 #include "duel_hands.h"
 #include "duel_math.h"
@@ -837,6 +838,47 @@ static void test_input_axes(void) {
     printf("input_axes ok (yaw %.2f pitch %.2f roll %.2f)\n", fy.x, fp.y, ur.x);
 }
 
+static void test_stick_expo(void) {
+    /* M33: response curve (deadzone rescale + expo). Fine near center,
+     * full rate at the stops, identical for stick and hand levers. */
+    const float dz = DUEL_DEADZONE;
+    DuelState s, h;
+    DuelInput in;
+    EXPECT(Duel_StickCurve(0.0f, dz) == 0.0f);
+    EXPECT(Duel_StickCurve(0.10f, dz) == 0.0f);
+    EXPECT(Duel_StickCurve(dz, dz) == 0.0f);
+    /* No edge jump: just past the deadzone the rate starts ~0. */
+    EXPECT(Duel_StickCurve(dz + 0.01f, dz) < 0.02f);
+    EXPECT(Duel_StickCurve(dz + 0.01f, dz) > 0.0f);
+    /* Stops stay full; over-travel clamps. */
+    EXPECT_NEAR(Duel_StickCurve(1.0f, dz), 1.0f, 1e-6f);
+    EXPECT_NEAR(Duel_StickCurve(-1.0f, dz), -1.0f, 1e-6f);
+    EXPECT(Duel_StickCurve(1.5f, dz) == Duel_StickCurve(1.0f, dz));
+    /* Mid-travel attenuated (pins EXPO 0.6: 0.5 -> ~0.207). */
+    EXPECT_NEAR(Duel_StickCurve(0.5f, dz), 0.2066f, 1e-3f);
+    EXPECT_NEAR(Duel_StickCurve(-0.5f, dz), -Duel_StickCurve(0.5f, dz), 1e-7f);
+    /* Integration: half stick turns far less than half rate. */
+    Duel_Init(&s);
+    memset(&in, 0, sizeof(in));
+    in.yaw = 0.5f;
+    for (int i = 0; i < 60; i++) Duel_Update(&s, &in, 1.0f / 60.0f);
+    {
+        DuelVec3 f = duel_q_forward(s.player.orient);
+        EXPECT(f.x > 0.10f && f.x < 0.25f); /* full stick: 0.78 */
+    }
+    /* Hand lever matches the stick at the same deflection. */
+    Duel_Init(&h);
+    Duel_SetHandDead(&h, dz);
+    Duel_HandStick(&h, 1, 0.0f, 0.5f);
+    memset(&in, 0, sizeof(in));
+    for (int i = 0; i < 60; i++) Duel_Update(&h, &in, 1.0f / 60.0f);
+    EXPECT_NEAR(h.player.orient.x, s.player.orient.x, 1e-6f);
+    EXPECT_NEAR(h.player.orient.y, s.player.orient.y, 1e-6f);
+    EXPECT_NEAR(h.player.orient.z, s.player.orient.z, 1e-6f);
+    EXPECT_NEAR(h.player.orient.w, s.player.orient.w, 1e-6f);
+    printf("stick_expo ok (half %.3f)\n", Duel_StickCurve(0.5f, dz));
+}
+
 static void test_neutral_head_inside_cockpit(void) {
     /* P0.4 §21: the calibrated neutral eye satisfies the §8 habitability
      * conditions as BOUNDS (not bare literals): behind the dash front,
@@ -1283,6 +1325,7 @@ static void test_muzzle_world(void) {
         EXPECT_NEAR(m0.z, 28.18f, 1e-5f);
         EXPECT_NEAR(m1.x, 4.65f, 1e-5f);
         EXPECT_NEAR(m5.x, 4.65f, 1e-5f); /* wraps mod 4 */
+        sh.craft = DUEL_CRAFT_TIE; /* M29: geometry follows craft */
         DuelVec3 t0 = Duel_MuzzleWorldAt(&sh, DUEL_SHIP_TIE, 0);
         DuelVec3 t1 = Duel_MuzzleWorldAt(&sh, DUEL_SHIP_TIE, 1);
         EXPECT_NEAR(t0.x, 10.35f, 1e-5f);
@@ -1292,6 +1335,7 @@ static void test_muzzle_world(void) {
     }
     {
         /* Rotated ship: offset rigid (length + forward projection kept). */
+        sh.craft = DUEL_CRAFT_XWING;
         sh.orient = duel_q_axis_angle(duel_v3(0, 1, 0), 1.1f);
         DuelVec3 m = Duel_MuzzleWorldAt(&sh, DUEL_SHIP_PLAYER, 2);
         DuelVec3 d = duel_v3_sub(m, sh.pos);
@@ -2780,7 +2824,10 @@ static void test_menu_rows(void) {
     /* BRIEF: labels skipped by nav + rect/hit. */
     DuelMenu_SetState(&m, DUEL_APP_BRIEF);
     n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
-    EXPECT(n == 9); /* M10: + BATALLA, M19: + RONDAS, MP-B1: + MODO */
+    EXPECT(n == 12); /* M10: + BATALLA, M19: + RONDAS, MP-B1: + MODO,
+                        M28: + MI NAVE + ENEMIGA, M31: BATALLA -> 2 filas */
+    m.craft_player = DUEL_CRAFT_XWING; /* M29: legacy skirmish lines */
+    m.craft_enemy = DUEL_CRAFT_TIE;    /* (brief now follows the setup) */
     EXPECT(m.sel == 3); /* DIFICULTAD choice */
     {
         float x0, y0, x1, y1;
@@ -2812,47 +2859,133 @@ static void test_menu_rows(void) {
     EXPECT(m.difficulty == DUEL_DIFF_PILOT);
     /* M10: choice click acts on the clicked row even when sel is elsewhere
      * (touch taps a row without moving the controller selection first). */
-    m.sel = 7; /* INICIAR */
+    m.sel = 10; /* INICIAR (M31: + ALIADOS + ENEMIGOS above) */
     EXPECT(DuelMenu_ActivateRow(&m, 3) == DUEL_ACT_NONE);
     EXPECT(m.difficulty == DUEL_DIFF_ACE);
     EXPECT(m.sel == 3);
-    /* M10: BATALLA cycles 1..5 with wraparound; brief lines follow. */
-    EXPECT(m.skirmish == 3);
+    /* M31: ALIADOS 0..4 + ENEMIGOS 0..5 with wraparound; brief follows. */
+    EXPECT(m.allies_n == 2 && m.foes_n == 3);
+    EXPECT(!strcmp(rows[4].label, "ALIADOS"));
+    EXPECT(!strcmp(rows[5].label, "ENEMIGOS"));
     m.sel = 4;
     DuelMenu_Adjust(&m, 1);
-    EXPECT(m.skirmish == 4);
-    EXPECT(!strcmp(m.dyn[4], "X-WING VS 4 TIE"));
+    EXPECT(m.allies_n == 3);
+    EXPECT(!strcmp(m.dyn[4], "X-WING+3 VS 3 TIE"));
     EXPECT(!strcmp(m.dyn[5], "ALIADOS: 3 X-WING"));
     DuelMenu_Adjust(&m, 1);
-    EXPECT(m.skirmish == 5);
+    EXPECT(m.allies_n == 4);
     DuelMenu_Adjust(&m, 1);
-    EXPECT(m.skirmish == 1); /* wrap */
-    EXPECT(!strcmp(m.dyn[4], "X-WING VS 1 TIE"));
+    EXPECT(m.allies_n == 0); /* wrap */
     EXPECT(!strcmp(m.dyn[5], "SIN ALIADOS"));
-    EXPECT(DuelMenu_ActivateRow(&m, 4) == DUEL_ACT_NONE);
-    EXPECT(m.skirmish == 2);
-    EXPECT(DuelMenu_ActivateRow(&m, 7) == DUEL_ACT_START);
+    m.sel = 5;
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.foes_n == 4);
+    EXPECT(!strcmp(m.dyn[4], "X-WING+0 VS 4 TIE"));
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.foes_n == 5);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.foes_n == 0); /* wrap */
+    EXPECT(!strcmp(m.dyn[4], "X-WING+0 VS 1 TIE")); /* skirmish needs 1 */
+    EXPECT(DuelMenu_ActivateRow(&m, 5) == DUEL_ACT_NONE);
+    EXPECT(m.foes_n == 1);
+    DuelMenu_Adjust(&m, 1); /* sel=5 (click moved it): foes 1->2 */
+    EXPECT(m.foes_n == 2);
+    m.sel = 4;
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.allies_n == 1);
+    EXPECT(DuelMenu_ActivateRow(&m, 10) == DUEL_ACT_START);
     /* M19: RONDAS cycles 1/3/5 with wraparound (default 3). */
     EXPECT(m.series_best == 3);
-    m.sel = 5;
+    m.sel = 6;
     DuelMenu_Adjust(&m, 1);
     EXPECT(m.series_best == 5);
     DuelMenu_Adjust(&m, 1);
     EXPECT(m.series_best == 1); /* wrap */
     DuelMenu_Adjust(&m, -1);
     EXPECT(m.series_best == 5);
-    EXPECT(DuelMenu_ActivateRow(&m, 5) == DUEL_ACT_NONE);
+    EXPECT(DuelMenu_ActivateRow(&m, 6) == DUEL_ACT_NONE);
     EXPECT(m.series_best == 1);
     /* MP-B1: MODO toggles skirmish/duel; brief lines follow. */
     EXPECT(m.duel_mode == 0);
-    EXPECT(rows[6].kind == DUEL_ROW_CHOICE);
-    EXPECT(!strcmp(rows[6].label, "MODO"));
-    EXPECT(DuelMenu_ActivateRow(&m, 6) == DUEL_ACT_NONE);
+    EXPECT(rows[7].kind == DUEL_ROW_CHOICE);
+    EXPECT(!strcmp(rows[7].label, "MODO"));
+    EXPECT(DuelMenu_ActivateRow(&m, 7) == DUEL_ACT_NONE);
     EXPECT(m.duel_mode == 1);
-    EXPECT(!strcmp(m.dyn[4], "DUELO PVP 1V1"));
+    EXPECT(!strcmp(m.dyn[4], "X-WING VS TIE")); /* M28: matchup line */
     EXPECT(!strcmp(m.dyn[5], "RIVAL: OTRO PILOTO"));
-    EXPECT(DuelMenu_ActivateRow(&m, 6) == DUEL_ACT_NONE);
+    EXPECT(DuelMenu_ActivateRow(&m, 7) == DUEL_ACT_NONE);
+    EXPECT(m.duel_mode == 2); /* M30: cruiser */
+    EXPECT(!strcmp(m.dyn[4], "X-WING VS ISD"));
+    EXPECT(!strcmp(m.dyn[5], "TORR:10+TIE:2")); /* M31: escort line */
+    m.sel = 5;
+    DuelMenu_Adjust(&m, -1);
+    DuelMenu_Adjust(&m, -1);
+    EXPECT(m.foes_n == 0);
+    EXPECT(!strcmp(m.dyn[5], "TORRETAS: 10")); /* 1v0: guns-only ISD */
+    DuelMenu_Adjust(&m, 1);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.foes_n == 2);
+    EXPECT(DuelMenu_ActivateRow(&m, 7) == DUEL_ACT_NONE);
     EXPECT(m.duel_mode == 0);
+    /* M28: MI NAVE / ENEMIGA cycle the XWA setup; duel brief follows. */
+    EXPECT(!strcmp(rows[8].label, "MI NAVE"));
+    EXPECT(!strcmp(rows[9].label, "ENEMIGA"));
+    m.sel = 8;
+    EXPECT(m.craft_player == DUEL_CRAFT_XWING);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.craft_player == DUEL_CRAFT_TIE);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.craft_player == DUEL_CRAFT_TIEIN);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.craft_player == DUEL_CRAFT_XWING); /* wrap */
+    DuelMenu_Adjust(&m, -1);
+    EXPECT(m.craft_player == DUEL_CRAFT_TIEIN);
+    m.sel = 9;
+    EXPECT(m.craft_enemy == DUEL_CRAFT_TIE); /* forced above (legacy) */
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.craft_enemy == DUEL_CRAFT_TIEIN);
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.craft_enemy == DUEL_CRAFT_XWING); /* wrap */
+    m.duel_mode = 1;
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.craft_enemy == DUEL_CRAFT_TIE);
+    EXPECT(!strcmp(m.dyn[4], "TIE INT VS TIE"));
+    /* M29: the skirmish brief follows the setup too. */
+    EXPECT(DuelMenu_ActivateRow(&m, 7) == DUEL_ACT_NONE);
+    EXPECT(m.duel_mode == 2); /* M30: 3-cycle */
+    EXPECT(!strcmp(m.dyn[4], "TIE INT VS ISD"));
+    EXPECT(DuelMenu_ActivateRow(&m, 7) == DUEL_ACT_NONE);
+    EXPECT(m.duel_mode == 0);
+    EXPECT(!strcmp(m.dyn[4], "TIE INT+1 VS 2 TIE"));
+    EXPECT(!strcmp(m.dyn[5], "ALIADOS: 1 TIE INT"));
+    /* M32: ENEMIGA locks in a guns-only cruiser (no enemy ship). */
+    {
+        char lval[16];
+        m.duel_mode = 2;
+        m.sel = 5;
+        DuelMenu_Adjust(&m, -1);
+        DuelMenu_Adjust(&m, -1);
+        EXPECT(m.foes_n == 0);
+        EXPECT(!strcmp(m.dyn[5], "TORRETAS: 10"));
+        DuelMenu_RowValue(&m, 9, lval, sizeof(lval));
+        EXPECT(!strcmp(lval, "---"));
+        {
+            int ce = m.craft_enemy;
+            m.sel = 9;
+            DuelMenu_Adjust(&m, 1);
+            EXPECT(m.craft_enemy == ce); /* locked: no-op */
+            EXPECT(DuelMenu_ActivateRow(&m, 9) == DUEL_ACT_NONE);
+            EXPECT(m.craft_enemy == ce);
+        }
+        m.sel = 5;
+        DuelMenu_Adjust(&m, 1);
+        EXPECT(m.foes_n == 1); /* escorts back: unlocked */
+        DuelMenu_RowValue(&m, 9, lval, sizeof(lval));
+        EXPECT(strcmp(lval, "---") != 0);
+        m.sel = 5;
+        DuelMenu_Adjust(&m, 1);
+        EXPECT(m.foes_n == 2);
+    }
     /* M10: PAUSED gained RECENTRAR (quick recenter without OPTIONS). */
     DuelMenu_SetState(&m, DUEL_APP_PAUSED);
     n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
@@ -2889,27 +3022,43 @@ static void test_menu_values(void) {
     m.difficulty = DUEL_DIFF_ROOKIE;
     DuelMenu_RowValue(&m, 3, val, sizeof(val));
     EXPECT(!strcmp(val, "FACIL"));
-    /* M10: BATALLA value tracks the battle size. */
+    /* M31: force values track the picks. */
     DuelMenu_RowValue(&m, 4, val, sizeof(val));
-    EXPECT(!strcmp(val, "3V3"));
-    m.skirmish = 1;
+    EXPECT(!strcmp(val, "2"));
+    m.allies_n = 0;
     DuelMenu_RowValue(&m, 4, val, sizeof(val));
-    EXPECT(!strcmp(val, "1V1"));
-    m.skirmish = 5;
+    EXPECT(!strcmp(val, "0"));
+    m.allies_n = 4;
     DuelMenu_RowValue(&m, 4, val, sizeof(val));
-    EXPECT(!strcmp(val, "5V5"));
-    /* M19: RONDAS value tracks the series length. */
+    EXPECT(!strcmp(val, "4"));
+    m.foes_n = 0;
     DuelMenu_RowValue(&m, 5, val, sizeof(val));
+    EXPECT(!strcmp(val, "0"));
+    m.foes_n = 5;
+    DuelMenu_RowValue(&m, 5, val, sizeof(val));
+    EXPECT(!strcmp(val, "5"));
+    /* M19: RONDAS value tracks the series length. */
+    DuelMenu_RowValue(&m, 6, val, sizeof(val));
     EXPECT(!strcmp(val, "3"));
     m.series_best = 1;
-    DuelMenu_RowValue(&m, 5, val, sizeof(val));
+    DuelMenu_RowValue(&m, 6, val, sizeof(val));
     EXPECT(!strcmp(val, "1"));
     /* MP-B1: MODO value tracks skirmish/duel. */
-    DuelMenu_RowValue(&m, 6, val, sizeof(val));
+    DuelMenu_RowValue(&m, 7, val, sizeof(val));
     EXPECT(!strcmp(val, "ESCARAMUZA"));
     m.duel_mode = 1;
-    DuelMenu_RowValue(&m, 6, val, sizeof(val));
+    DuelMenu_RowValue(&m, 7, val, sizeof(val));
     EXPECT(!strcmp(val, "DUELO"));
+    m.duel_mode = 2;
+    DuelMenu_RowValue(&m, 7, val, sizeof(val));
+    EXPECT(!strcmp(val, "CRUCERO"));
+    /* M28: craft rows show the setup picks. */
+    m.craft_player = DUEL_CRAFT_TIEIN;
+    DuelMenu_RowValue(&m, 8, val, sizeof(val));
+    EXPECT(!strcmp(val, "TIE INT"));
+    m.craft_enemy = DUEL_CRAFT_TIE;
+    DuelMenu_RowValue(&m, 9, val, sizeof(val));
+    EXPECT(!strcmp(val, "TIE"));
     DuelMenu_SetState(&m, DUEL_APP_OPTIONS);
     m.vol_master = 0.8f;
     DuelMenu_RowValue(&m, 0, val, sizeof(val));
@@ -2927,6 +3076,122 @@ static void test_menu_values(void) {
     DuelMenu_RowValue(&m, 1, val, sizeof(val));
     EXPECT(!strcmp(val, "-"));
     printf("menu_values ok\n");
+}
+
+static void test_menu_ray(void) {
+    /* M35 controller ray: panel-plane hit -> row; RAYO MANDO option;
+     * dash HP anchor sane (front-center, below the eye, in reach). */
+    DuelMenu m;
+    DuelMenuRow rows[DUEL_MENU_MAXROWS];
+    DuelVec3 c = duel_v3(0.0f, 0.0f, 0.0f);
+    DuelVec3 right = duel_v3(1.0f, 0.0f, 0.0f);
+    DuelVec3 up = duel_v3(0.0f, 1.0f, 0.0f);
+    DuelVec3 n = duel_v3(0.0f, 0.0f, 1.0f);
+    float lx, ly;
+    int nrows, i;
+    char val[16];
+    DuelMenu_Init(&m);
+    DuelMenu_SetState(&m, DUEL_APP_MENU);
+    nrows = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+    EXPECT(nrows == 4);
+    /* Every row center ray-hits its own row. */
+    for (i = 0; i < nrows; i++) {
+        float x0, y0, x1, y1;
+        DuelVec3 ro;
+        int hit;
+        EXPECT(DuelMenu_RowRect(&m, i, &x0, &y0, &x1, &y1));
+        ro = duel_v3((x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 0.5f);
+        hit = DuelMenu_RayHit(&m, ro, duel_v3(0.0f, 0.0f, -1.0f),
+                              c, right, up, n, &lx, &ly);
+        EXPECT(hit == i);
+        EXPECT_NEAR(lx, (x0 + x1) * 0.5f, 1e-4f);
+        EXPECT_NEAR(ly, (y0 + y1) * 0.5f, 1e-4f);
+    }
+    /* Misses: parallel, facing away, behind, off-panel, past 5 m. */
+    EXPECT(DuelMenu_RayHit(&m, duel_v3(0, 0, 0.5f), duel_v3(1, 0, 0),
+                           c, right, up, n, &lx, &ly) < 0);
+    EXPECT(DuelMenu_RayHit(&m, duel_v3(0, 0, 0.5f), duel_v3(0, 0, 1),
+                           c, right, up, n, &lx, &ly) < 0);
+    EXPECT(DuelMenu_RayHit(&m, duel_v3(0, 0, -0.5f), duel_v3(0, 0, -1),
+                           c, right, up, n, &lx, &ly) < 0);
+    EXPECT(DuelMenu_RayHit(&m, duel_v3(10, 0, 0.5f), duel_v3(0, 0, -1),
+                           c, right, up, n, &lx, &ly) < 0);
+    EXPECT(DuelMenu_RayHit(&m, duel_v3(0, 0, 6.0f), duel_v3(0, 0, -1),
+                           c, right, up, n, &lx, &ly) < 0);
+    EXPECT(DuelMenu_RayHit(NULL, duel_v3(0, 0, 0.5f), duel_v3(0, 0, -1),
+                           c, right, up, n, &lx, &ly) < 0);
+    /* M38 RayPlane: the split plane hit (t = reach, lx/ly shared). */
+    {
+        float t = -1.0f;
+        int pl = DuelMenu_RayPlane(&m, duel_v3(0.1f, -0.05f, 0.5f),
+                                   duel_v3(0.0f, 0.0f, -1.0f),
+                                   c, right, up, n, &lx, &ly, &t);
+        EXPECT(pl == 1);
+        EXPECT_NEAR(t, 0.5f, 1e-5f);
+        EXPECT_NEAR(lx, 0.1f, 1e-5f);
+        EXPECT_NEAR(ly, -0.05f, 1e-5f);
+        /* Same ray through RayHit agrees on the point. */
+        {
+            float hx = 0.0f, hy = 0.0f;
+            int hit = DuelMenu_RayHit(&m, duel_v3(0.1f, -0.05f, 0.5f),
+                                      duel_v3(0.0f, 0.0f, -1.0f),
+                                      c, right, up, n, &hx, &hy);
+            EXPECT(hit == DuelMenu_HitRow(&m, lx, ly));
+            EXPECT_NEAR(hx, lx, 1e-6f);
+            EXPECT_NEAR(hy, ly, 1e-6f);
+        }
+        EXPECT(DuelMenu_RayPlane(NULL, duel_v3(0, 0, 0.5f),
+                                 duel_v3(0, 0, -1), c, right, up, n,
+                                 &lx, &ly, &t) == 0);
+        EXPECT(DuelMenu_RayPlane(&m, duel_v3(10, 0, 0.5f),
+                                 duel_v3(0, 0, -1), c, right, up, n,
+                                 &lx, &ly, &t) == 0);
+        EXPECT(DuelMenu_RayPlane(&m, duel_v3(0, 0, 0.5f),
+                                 duel_v3(0, 0, 1), c, right, up, n,
+                                 &lx, &ly, &t) == 0);
+    }
+    /* RAYO MANDO option (row 5: sliders keep 0..4). */
+    DuelMenu_SetState(&m, DUEL_APP_OPTIONS);
+    nrows = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+    EXPECT(nrows == 9);
+    EXPECT(rows[5].kind == DUEL_ROW_CHOICE);
+    EXPECT(!strcmp(rows[5].label, "RAYO MANDO"));
+    EXPECT(m.ray_on == 1);
+    DuelMenu_RowValue(&m, 5, val, sizeof(val));
+    EXPECT(!strcmp(val, "SI"));
+    m.sel = 5;
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.ray_on == 0);
+    DuelMenu_RowValue(&m, 5, val, sizeof(val));
+    EXPECT(!strcmp(val, "NO"));
+    EXPECT(DuelMenu_ActivateRow(&m, 5) == DUEL_ACT_NONE); /* click cycles */
+    EXPECT(m.ray_on == 1);
+    /* M36 MANO option (row 6: right-handed by default). */
+    EXPECT(rows[6].kind == DUEL_ROW_CHOICE);
+    EXPECT(!strcmp(rows[6].label, "MANO"));
+    EXPECT(m.hand_left == 0);
+    DuelMenu_RowValue(&m, 6, val, sizeof(val));
+    EXPECT(!strcmp(val, "DIESTRA"));
+    m.sel = 6;
+    DuelMenu_Adjust(&m, 1);
+    EXPECT(m.hand_left == 1);
+    DuelMenu_RowValue(&m, 6, val, sizeof(val));
+    EXPECT(!strcmp(val, "ZURDA"));
+    EXPECT(DuelMenu_ActivateRow(&m, 6) == DUEL_ACT_NONE);
+    EXPECT(m.hand_left == 0);
+    /* Sliders unshifted. */
+    DuelMenu_SetSlider(&m, 4, 1.0f);
+    EXPECT_NEAR(m.dead, 0.30f, 1e-6f);
+    /* Dash HP anchor: centered, below the eye, ahead, within reach. */
+    {
+        DuelVec3 seat = duel_v3(0.0f, 0.75f, -0.78f);
+        float d = duel_v3_len(duel_v3_sub(DUEL_DASHHP_SHIP, seat));
+        EXPECT(fabsf(DUEL_DASHHP_SHIP.x) < 0.10f);
+        EXPECT(DUEL_DASHHP_SHIP.y < 0.75f && DUEL_DASHHP_SHIP.y > 0.10f);
+        EXPECT(DUEL_DASHHP_SHIP.z < -0.78f);
+        EXPECT(d > 0.30f && d < 0.80f);
+    }
+    printf("menu_ray ok\n");
 }
 
 #define DUEL_TEST_PROFDIR "/data/local/tmp/duel_test_prof"
@@ -3221,29 +3486,29 @@ static void test_touch_level(void) {
     printf("touch_level ok\n");
 }
 
-/* M10 battle sizes 1v1..5v5: wanted counts, spawn alive sets, clamp,
- * reset survival, and wave-end per size. */
+/* M31 asymmetric forces: wanted counts, spawn alive sets, clamp,
+ * reset survival, wave-end, and the skirmish >= 1 foe rule. */
 static void test_skirmish(void) {
     DuelState s;
     int n;
-    Duel_SetSkirmish(&s, 99);
-    EXPECT(s.skirmish == 5);
-    Duel_SetSkirmish(&s, -99);
-    EXPECT(s.skirmish == 1);
+    Duel_SetForces(&s, 99, 99);
+    EXPECT(s.allies_n == 4 && s.foes_n == 5);
+    Duel_SetForces(&s, -99, -99);
+    EXPECT(s.allies_n == 0 && s.foes_n == 0);
     for (n = 1; n <= 5; n++) {
-        int k;
+        int k, al = n < 4 ? n : 4;
         Duel_Init(&s);
-        Duel_SetSkirmish(&s, n);
+        Duel_SetForces(&s, al, n);
         Duel_ResetCombat(&s);
-        EXPECT(s.skirmish == n); /* survives reset */
+        EXPECT(s.allies_n == al && s.foes_n == n); /* survive reset */
         EXPECT(Duel_TiesWanted(&s) == n);
-        EXPECT(Duel_AlliesWanted(&s) == n - 1);
+        EXPECT(Duel_AlliesWanted(&s) == al);
         EXPECT(Duel_TiesAlive(&s) == n);
-        EXPECT(Duel_AlliesAlive(&s) == n - 1);
+        EXPECT(Duel_AlliesAlive(&s) == al);
         for (k = 0; k < DUEL_TIE_COUNT; k++)
             EXPECT(s.ties[k].alive == (k < n ? 1 : 0));
         for (k = 0; k < DUEL_ALLY_COUNT; k++)
-            EXPECT(s.allies[k].alive == (k < n - 1 ? 1 : 0));
+            EXPECT(s.allies[k].alive == (k < al ? 1 : 0));
         /* Parked extras still have sane spawn poses (facing player). */
         for (k = n; k < DUEL_TIE_COUNT; k++) {
             DuelVec3 kf = duel_q_forward(s.ties[k].orient);
@@ -3263,12 +3528,19 @@ static void test_skirmish(void) {
         }
         EXPECT(s.phase == DUEL_PHASE_DESTROYED);
     }
-    /* 1v1: no allies, auto-target still finds the duel. */
+    /* Lone wolf 1v1: no allies, auto-target still finds the duel. */
     Duel_Init(&s);
-    Duel_SetSkirmish(&s, 1);
+    Duel_SetForces(&s, 0, 1);
     Duel_ResetCombat(&s);
     EXPECT(Duel_AlliesAlive(&s) == 0);
     EXPECT(Duel_AutoTarget(&s) == 0);
+    /* Skirmish clamps 0 foes to 1 (the 1v0 belongs to the cruiser). */
+    Duel_Init(&s);
+    Duel_SetForces(&s, 0, 0);
+    Duel_ResetCombat(&s);
+    EXPECT(Duel_TiesWanted(&s) == 1);
+    EXPECT(Duel_TiesAlive(&s) == 1);
+    EXPECT(Duel_AlliesAlive(&s) == 0);
     printf("skirmish ok\n");
 }
 
@@ -3302,7 +3574,7 @@ static void test_home_anchor(void) {
         DuelMenu_Init(&m);
         DuelMenu_SetState(&m, DUEL_APP_BRIEF);
         ph = DuelMenu_PanelH(&m);
-        EXPECT(ph > 0.28f && ph < 0.31f); /* 9-row brief fits the view */
+        EXPECT(ph > 0.36f && ph < 0.39f); /* 12-row brief fits the view */
     }
     printf("home_anchor ok\n");
 }
@@ -3344,12 +3616,12 @@ static void test_series(void) {
     DuelMenu_Init(&m);
     EXPECT(m.series_best == 3);
     EXPECT(m.series_round == 0 && m.series_won == 0);
-    /* BRIEF carries the RONDAS choice at row 5. */
+    /* BRIEF carries the RONDAS choice at row 6 (M31). */
     DuelMenu_SetState(&m, DUEL_APP_BRIEF);
     n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
-    EXPECT(n == 9);
-    EXPECT(rows[5].kind == DUEL_ROW_CHOICE);
-    EXPECT(!strcmp(rows[5].label, "RONDAS"));
+    EXPECT(n == 12);
+    EXPECT(rows[6].kind == DUEL_ROW_CHOICE);
+    EXPECT(!strcmp(rows[6].label, "RONDAS"));
     /* RESULT carries the series line under the pilot line. */
     m.series_round = 2;
     m.series_won = 1;
@@ -3361,6 +3633,137 @@ static void test_series(void) {
     EXPECT(!strcmp(m.series_line, "RONDA 2 DE 3 GANADAS: 1"));
     EXPECT(!strcmp(rows[1].label, m.series_line));
     printf("series ok\n");
+}
+
+static void test_continue(void) {
+    /* M34 CONTINUE?: defeat holds the battle (no auto-reset),
+     * respawn drops a fresh player into it, untouched otherwise. */
+    DuelState s;
+    DuelInput in;
+    int i, ties0, kills0;
+    float tiehp0;
+    memset(&in, 0, sizeof(in));
+    Duel_Init(&s);
+    Duel_SetForces(&s, 0, 0); /* no wingmen: the held beat stays frozen */
+    Duel_ResetCombat(&s);
+    /* Sanity: without the hold the auto-reset still fires. */
+    s.player.alive = 0;
+    s.player.hp = 0.0f;
+    Duel_Update(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.phase == DUEL_PHASE_DESTROYED);
+    for (i = 0; i < 200; i++) Duel_Update(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.phase == DUEL_PHASE_COMBAT && s.player.alive);
+    /* Held defeat: the wreck survives past the reset delay. */
+    s.player.alive = 0;
+    s.player.hp = 0.0f;
+    Duel_Update(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.phase == DUEL_PHASE_DESTROYED);
+    s.result_hold = 1; /* main sets this on the death edge */
+    ties0 = Duel_TiesAlive(&s);
+    tiehp0 = s.ties[0].hp;
+    kills0 = s.kills_player;
+    for (i = 0; i < 200; i++) Duel_Update(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.phase == DUEL_PHASE_DESTROYED);
+    EXPECT(Duel_TiesAlive(&s) == ties0);
+    EXPECT(s.ties[0].hp == tiehp0);
+    EXPECT(s.kills_player == kills0);
+    /* CONTINUAR: same spot, full HP, hold released (M35: no restart). */
+    {
+        DuelVec3 death = s.player.pos;
+        Duel_RespawnPlayer(&s);
+        EXPECT_NEAR(s.player.pos.x, death.x, 1e-4f);
+        EXPECT_NEAR(s.player.pos.y, death.y, 1e-4f);
+        EXPECT_NEAR(s.player.pos.z, death.z, 1e-4f);
+    }
+    EXPECT(s.phase == DUEL_PHASE_COMBAT && s.phase_t == 0.0f);
+    EXPECT(s.result_hold == 0);
+    EXPECT(s.player.alive);
+    EXPECT_NEAR(s.player.hp, Duel_CraftHP(s.craft_player), 1e-4f);
+    EXPECT(Duel_TiesAlive(&s) == ties0);
+    EXPECT(s.ties[0].hp == tiehp0);
+    EXPECT(s.kills_player == kills0);
+    /* M36 mercy shield: bolts fizzle on the fresh respawn, bite after. */
+    EXPECT_NEAR(s.player.shield_t, DUEL_RESPAWN_SHIELD_S, 1e-4f);
+    {
+        float hp0 = s.player.hp;
+        s.lasers[0].active = 1;
+        s.lasers[0].owner = DUEL_SHIP_TIE;
+        s.lasers[0].pos = s.player.pos;
+        s.lasers[0].vel = duel_v3(0.0f, 0.0f, 0.0f);
+        s.lasers[0].life = DUEL_LASER_LIFETIME;
+        Duel_Update(&s, &in, 1.0f / 60.0f);
+        EXPECT(s.lasers[0].active == 0); /* fizzled on contact */
+        EXPECT(s.player.hp == hp0);
+        EXPECT(s.player.shield_t < DUEL_RESPAWN_SHIELD_S); /* ticking */
+        s.player.shield_t = 0.0f;
+        s.lasers[0].active = 1;
+        s.lasers[0].owner = DUEL_SHIP_TIE;
+        s.lasers[0].pos = s.player.pos;
+        s.lasers[0].vel = duel_v3(0.0f, 0.0f, 0.0f);
+        s.lasers[0].life = DUEL_LASER_LIFETIME;
+        Duel_Update(&s, &in, 1.0f / 60.0f);
+        EXPECT(s.player.hp < hp0); /* shield down: damage resumes */
+    }
+    /* Cruiser: hull + sub damage survive the continue. */
+    Duel_SetForces(&s, 0, 0);
+    Duel_ResetCruiser(&s);
+    s.cruiser.hp = 2000.0f;
+    s.cruiser.sub_hp[3] = 50.0f;
+    s.player.alive = 0;
+    s.player.hp = 0.0f;
+    Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.phase == DUEL_PHASE_DESTROYED);
+    s.result_hold = 1;
+    for (i = 0; i < 200; i++) Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.phase == DUEL_PHASE_DESTROYED);
+    Duel_RespawnPlayer(&s);
+    EXPECT(s.phase == DUEL_PHASE_COMBAT && s.player.alive);
+    EXPECT_NEAR(s.cruiser.hp, 2000.0f, 1e-3f);
+    EXPECT_NEAR(s.cruiser.sub_hp[3], 50.0f, 1e-4f);
+    /* M36: shielded scrape slows but never burns. */
+    {
+        float chp = Duel_CraftHP(s.craft_player);
+        s.player.pos = s.cruiser.sph[2];
+        s.player.speed = 150.0f;
+        for (i = 0; i < 60; i++)
+            Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+        EXPECT(s.player.hp == chp);
+        EXPECT(s.player.speed <= 40.1f);
+        EXPECT(s.player.alive);
+    }
+    {
+        /* RESULT asks CONTINUE? on AI defeat (only there). */
+        DuelMenu m;
+        DuelMenuRow rows[DUEL_MENU_MAXROWS];
+        int n;
+        DuelMenu_Init(&m);
+        m.duel_mode = 0;
+        m.result_win = 0;
+        DuelMenu_SetState(&m, DUEL_APP_RESULT);
+        n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+        EXPECT(n == 5);
+        EXPECT(!strcmp(DuelMenu_Title(&m), "CONTINUAR?"));
+        EXPECT(!strcmp(rows[2].label, "CONTINUAR"));
+        EXPECT(rows[2].kind == DUEL_ROW_ACTION);
+        EXPECT(DuelMenu_ActivateRow(&m, 2) == DUEL_ACT_CONTINUE);
+        EXPECT(!strcmp(rows[3].label, "REPETIR"));
+        EXPECT(!strcmp(rows[4].label, "MENU"));
+        m.duel_mode = 2;
+        EXPECT(!strcmp(DuelMenu_Title(&m), "CONTINUAR?"));
+        n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+        EXPECT(n == 5 && !strcmp(rows[2].label, "CONTINUAR"));
+        /* Decided duel: DERROTA, no continue. Victory: VICTORIA. */
+        m.duel_mode = 1;
+        EXPECT(!strcmp(DuelMenu_Title(&m), "DERROTA"));
+        n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+        EXPECT(n == 4 && !strcmp(rows[2].label, "REPETIR"));
+        m.duel_mode = 0;
+        m.result_win = 1;
+        EXPECT(!strcmp(DuelMenu_Title(&m), "VICTORIA"));
+        n = DuelMenu_Rows(&m, rows, DUEL_MENU_MAXROWS);
+        EXPECT(n == 4 && !strcmp(rows[2].label, "REPETIR"));
+    }
+    printf("continue ok\n");
 }
 
 /* M15 panel grab: pinch-latch near the panel. Latch needs shut+near;
@@ -3568,6 +3971,324 @@ static void test_drone_ai(void) {
     printf("drone_ai ok\n");
 }
 
+static void test_env_pick(void) {
+    /* M27: pure pick (same seed in, same scene out), in-range always,
+     * and the seeds around a boundary visit every scene. */
+    int seen[DUEL_ENV_COUNT] = { 0, 0, 0 };
+    unsigned s;
+    EXPECT(DUEL_ENV_COUNT == 3);
+    EXPECT(DuelEnv_Pick(12345u) == DuelEnv_Pick(12345u));
+    for (s = 0; s < 300u; s++) {
+        int e = DuelEnv_Pick(s);
+        EXPECT(e >= 0 && e < DUEL_ENV_COUNT);
+        seen[e]++;
+    }
+    EXPECT(seen[0] > 0 && seen[1] > 0 && seen[2] > 0);
+    /* env 0 keeps the M2.2 measured constants verbatim. */
+    EXPECT(DUEL_ENVS[0].body_u == 0.4049f && DUEL_ENVS[0].body_v == 0.4922f);
+    EXPECT(DUEL_ENVS[0].cull_dot == 0.9613f);
+    EXPECT(DUEL_ENVS[0].sun_u == 0.9175f && DUEL_ENVS[0].sun_v == 0.2246f);
+    printf("env_pick ok\n");
+}
+
+static void test_craft(void) {
+    /* M28: XWA setup picks (default duel X-Wing vs TIE Interceptor). */
+    DuelState s;
+    DuelShip sh;
+    DuelInput in;
+    int i;
+    memset(&in, 0, sizeof(in));
+    Duel_Init(&s);
+    EXPECT(s.craft_player == DUEL_CRAFT_XWING);
+    EXPECT(s.craft_enemy == DUEL_CRAFT_TIEIN);
+    Duel_ResetDuel(&s);
+    EXPECT(s.player.craft == DUEL_CRAFT_XWING);
+    EXPECT(s.peer.craft == DUEL_CRAFT_TIEIN);
+    EXPECT_NEAR(s.player.hp, DUEL_PLAYER_HP, 1e-4f);
+    EXPECT_NEAR(s.peer.hp, DUEL_IN_HP, 1e-4f);
+    /* table. */
+    EXPECT_NEAR(Duel_CraftHP(DUEL_CRAFT_XWING), DUEL_PLAYER_HP, 1e-5f);
+    EXPECT_NEAR(Duel_CraftHP(DUEL_CRAFT_TIE), DUEL_TIE_HP, 1e-5f);
+    EXPECT_NEAR(Duel_CraftHP(DUEL_CRAFT_TIEIN), DUEL_IN_HP, 1e-5f);
+    EXPECT_NEAR(Duel_CraftRadius(DUEL_CRAFT_XWING), DUEL_PLAYER_RADIUS, 1e-5f);
+    EXPECT_NEAR(Duel_CraftRadius(DUEL_CRAFT_TIE), DUEL_TIE_RADIUS, 1e-5f);
+    EXPECT_NEAR(Duel_CraftRadius(DUEL_CRAFT_TIEIN), DUEL_IN_RADIUS, 1e-5f);
+    /* clamp + survive resets. */
+    Duel_SetCrafts(&s, -3, 99);
+    EXPECT(s.craft_player == 0 && s.craft_enemy == DUEL_CRAFT_COUNT - 1);
+    Duel_SetCrafts(&s, DUEL_CRAFT_TIE, DUEL_CRAFT_XWING);
+    Duel_ResetDuel(&s);
+    EXPECT(s.craft_player == DUEL_CRAFT_TIE);
+    EXPECT(s.craft_enemy == DUEL_CRAFT_XWING);
+    EXPECT(s.player.craft == DUEL_CRAFT_TIE);
+    EXPECT(s.peer.craft == DUEL_CRAFT_XWING);
+    EXPECT_NEAR(s.player.hp, DUEL_TIE_HP, 1e-4f);
+    EXPECT_NEAR(s.peer.hp, DUEL_PLAYER_HP, 1e-4f);
+    Duel_ResetCombat(&s);
+    EXPECT(s.craft_player == DUEL_CRAFT_TIE);
+    EXPECT(s.craft_enemy == DUEL_CRAFT_XWING);
+    /* M29 skirmish mirror: ties fly ENEMIGA, allies MI NAVE (role
+     * HP/AI frozen, exterior + muzzles follow the setup). */
+    EXPECT(s.ties[0].craft == DUEL_CRAFT_XWING);
+    EXPECT(s.allies[0].craft == DUEL_CRAFT_TIE);
+    {
+        DuelVec3 tm = Duel_MuzzleWorldAt(&s.ties[0], DUEL_SHIP_TIE, 0);
+        DuelVec3 off = duel_v3_sub(tm, s.ties[0].pos);
+        /* X-Wing set on AI rails: wingtip offsets, not chin guns. */
+        EXPECT(duel_v3_len(off) > 4.0f);
+    }
+    /* interceptor envelope: outruns the X-Wing. */
+    Duel_SetCrafts(&s, DUEL_CRAFT_TIEIN, DUEL_CRAFT_TIEIN);
+    Duel_ResetDuel(&s);
+    in.thr_axis = 1.0f;
+    for (i = 0; i < 600; i++)
+        Duel_UpdateDuel(&s, &in, &in, 1.0f / 60.0f);
+    EXPECT(s.player.speed > DUEL_PLAYER_MAX_SPEED);
+    EXPECT_NEAR(s.player.speed, DUEL_IN_MAX_SPEED, 2.0f);
+    /* interceptor turn: 1 s of full pitch beats the X-Wing arc. */
+    Duel_ResetDuel(&s);
+    memset(&in, 0, sizeof(in));
+    in.pitch = 1.0f;
+    {
+        DuelVec3 f0 = duel_q_forward(s.player.orient);
+        for (i = 0; i < 60; i++)
+            Duel_UpdateDuel(&s, &in, &in, 1.0f / 60.0f);
+        /* 1.9 rad turned: cos < cos(1.6) + margin. */
+        EXPECT(duel_v3_dot(f0, duel_q_forward(s.player.orient)) < -0.1f);
+    }
+    /* interceptor muzzles: wingtip quad, 6.71 fwd. */
+    memset(&sh, 0, sizeof(sh));
+    sh.pos = duel_v3(0, 0, 0);
+    sh.orient = duel_q_identity();
+    sh.craft = DUEL_CRAFT_TIEIN;
+    {
+        DuelVec3 m0 = Duel_MuzzleWorldAt(&sh, DUEL_SHIP_PEER, 0);
+        DuelVec3 m3 = Duel_MuzzleWorldAt(&sh, DUEL_SHIP_PEER, 3);
+        EXPECT_NEAR(m0.x, DUEL_IN_MUZZ_X, 1e-5f);
+        EXPECT_NEAR(m0.y, DUEL_IN_MUZZ_Y, 1e-5f);
+        EXPECT_NEAR(m0.z, -DUEL_IN_MUZZ_FWD, 1e-5f);
+        EXPECT_NEAR(m3.x, -DUEL_IN_MUZZ_X, 1e-5f);
+        EXPECT_NEAR(m3.y, -DUEL_IN_MUZZ_Y, 1e-5f);
+        EXPECT_NEAR(m3.z, -DUEL_IN_MUZZ_FWD, 1e-5f);
+    }
+    /* peer-as-TIE: chin pair, like the AI. */
+    sh.craft = DUEL_CRAFT_TIE;
+    {
+        DuelVec3 t0 = Duel_MuzzleWorldAt(&sh, DUEL_SHIP_PEER, 0);
+        EXPECT_NEAR(t0.x, 0.35f, 1e-5f);
+        EXPECT_NEAR(t0.y, -0.80f, 1e-5f);
+        EXPECT_NEAR(t0.z, -1.5f, 1e-5f);
+    }
+    printf("craft ok\n");
+}
+
+static void test_cruiser(void) {
+    /* M30: ISD gun platform (hull spheres, turret volleys, ram, kill). */
+    DuelState s;
+    DuelInput in;
+    int i, nb;
+    memset(&in, 0, sizeof(in));
+    Duel_Init(&s);
+    Duel_ResetCruiser(&s);
+    EXPECT(s.cruiser_mode == 1 && s.duel_mode == 0);
+    EXPECT(s.cruiser.alive);
+    EXPECT_NEAR(s.cruiser.hp, DUEL_CRUISER_HP, 1e-3f);
+    EXPECT_NEAR(s.cruiser.pos.z, -DUEL_CRUISER_SPAWN_FWD, 1e-3f);
+    EXPECT(Duel_TiesAlive(&s) == 3); /* default escorts */
+    EXPECT(Duel_AlliesAlive(&s) == 2); /* default ALIADOS */
+    /* 1v0: guns-only ISD (no escorts, no wingmen). */
+    Duel_SetForces(&s, 0, 0);
+    Duel_ResetCruiser(&s);
+    EXPECT(Duel_TiesWanted(&s) == 0); /* cruiser allows 0 */
+    EXPECT(Duel_TiesAlive(&s) == 0);
+    EXPECT(Duel_AlliesAlive(&s) == 0);
+    /* 6 world spheres bracket the 1612 m hull bow..stern. */
+    {
+        float zmin = 1e30f, zmax = -1e30f;
+        for (i = 0; i < DUEL_CRUISER_SPHERES; i++) {
+            float d = duel_v3_len(duel_v3_sub(s.cruiser.sph[i],
+                                              s.cruiser.pos));
+            EXPECT(d < 900.0f);
+            if (s.cruiser.sph[i].z < zmin) zmin = s.cruiser.sph[i].z;
+            if (s.cruiser.sph[i].z > zmax) zmax = s.cruiser.sph[i].z;
+        }
+        EXPECT(zmax - zmin > 1200.0f);
+    }
+    /* turrets open fire: imperial bolts with capital reach. */
+    for (i = 0; i < 120; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    nb = 0;
+    for (i = 0; i < DUEL_LASER_POOL; i++)
+        if (s.lasers[i].active && s.lasers[i].owner == DUEL_SHIP_TIE) nb++;
+    EXPECT(nb > 0);
+    /* point-blank kill path (3 bolts, not the 2500 grind). Off-axis:
+     * the bow chin turret sits near the centerline and M32 mounts
+     * eat aimed bolts, so dead-ahead fire would feed the turret. */
+    s.player.pos = duel_v3(100.0f, 0.0f, -900.0f);
+    s.player.orient = duel_q_identity();
+    s.player.speed = 0.0f;
+    s.player.throttle = 0.0f;
+    s.cruiser.hp = 36.0f;
+    memset(&in, 0, sizeof(in));
+    in.fire = 1;
+    for (i = 0; i < 600 && s.cruiser.alive; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    EXPECT(!s.cruiser.alive && s.player.alive);
+    EXPECT(s.phase == DUEL_PHASE_DESTROYED);
+    /* dead guns stay silent (rebel bolts don't count). */
+    for (i = 0; i < DUEL_LASER_POOL; i++) s.lasers[i].active = 0;
+    for (i = 0; i < 60; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    nb = 0;
+    for (i = 0; i < DUEL_LASER_POOL; i++)
+        if (s.lasers[i].active && s.lasers[i].owner == DUEL_SHIP_TIE) nb++;
+    EXPECT(nb == 0);
+    /* skirmish-style auto-reset serves a fresh cruiser (hold fire:
+     * the bow sphere is inside bolt range from spawn). */
+    memset(&in, 0, sizeof(in));
+    for (i = 0; i < 300; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.phase == DUEL_PHASE_COMBAT && s.cruiser.alive);
+    EXPECT_NEAR(s.cruiser.hp, DUEL_CRUISER_HP, 1e-3f);
+    /* hull scrape burns and slows. */
+    Duel_ResetCruiser(&s);
+    s.player.pos = s.cruiser.sph[2];
+    s.player.hp = DUEL_PLAYER_HP;
+    memset(&in, 0, sizeof(in));
+    for (i = 0; i < 60; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.player.hp < DUEL_PLAYER_HP);
+    EXPECT(s.player.speed <= 40.1f);
+    /* M32 subsystems: 10 turrets + 2 domes + bridge, full HP, sane
+     * positions (bridge high between the domes). */
+    Duel_SetForces(&s, 0, 0);
+    Duel_ResetCruiser(&s);
+    for (i = 0; i < DUEL_CRUISER_SUBS; i++) {
+        DuelVec3 sp = Duel_CruiserSubPos(&s, i);
+        EXPECT_NEAR(s.cruiser.sub_hp[i], Duel_CruiserSubMaxHP(i), 1e-4f);
+        EXPECT(duel_v3_len(duel_v3_sub(sp, s.cruiser.pos)) < 900.0f);
+    }
+    EXPECT_NEAR(Duel_CruiserSubMaxHP(0), DUEL_CRUISER_TURRET_HP, 1e-4f);
+    EXPECT_NEAR(Duel_CruiserSubMaxHP(DUEL_CRUISER_SUB_DOME0),
+                DUEL_CRUISER_DOME_HP, 1e-4f);
+    EXPECT_NEAR(Duel_CruiserSubMaxHP(DUEL_CRUISER_SUB_BRIDGE),
+                DUEL_CRUISER_BRIDGE_HP, 1e-4f);
+    {
+        DuelVec3 b = Duel_CruiserSubPos(&s, DUEL_CRUISER_SUB_BRIDGE);
+        EXPECT(b.y > 200.0f);
+    }
+    /* Aimed turret shot: the turret eats it, the hull doesn't. */
+    {
+        DuelVec3 t8 = Duel_CruiserSubPos(&s, 8);
+        s.player.pos = duel_v3(t8.x, t8.y, t8.z + 300.0f);
+        s.player.orient = duel_q_identity();
+        s.player.speed = 0.0f;
+        s.player.throttle = 0.0f;
+        s.player.hp = DUEL_PLAYER_HP;
+        memset(&in, 0, sizeof(in));
+        for (i = 0; i < 40; i++)
+            Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+        in.fire = 1;
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+        in.fire = 0;
+        for (i = 0; i < 120; i++)
+            Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+        EXPECT(s.cruiser.sub_hp[8] < DUEL_CRUISER_TURRET_HP);
+        EXPECT_NEAR(s.cruiser.hp, DUEL_CRUISER_HP, 1e-3f);
+    }
+    /* 15 bolts kill a turret; dead batteries stay silent. */
+    s.player.hp = DUEL_PLAYER_HP; /* fresh legs for the grind */
+    memset(&in, 0, sizeof(in));
+    in.fire = 1;
+    for (i = 0; i < 400 && s.cruiser.sub_hp[8] > 0.0f; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    EXPECT(s.cruiser.sub_hp[8] == 0.0f);
+    EXPECT(s.player.alive);
+    for (i = 0; i < DUEL_CRUISER_TURRETS; i++) s.cruiser.sub_hp[i] = 0.0f;
+    for (i = 0; i < DUEL_LASER_POOL; i++) s.lasers[i].active = 0;
+    memset(&in, 0, sizeof(in));
+    for (i = 0; i < 120; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    nb = 0;
+    for (i = 0; i < DUEL_LASER_POOL; i++)
+        if (s.lasers[i].active && s.lasers[i].owner == DUEL_SHIP_TIE) nb++;
+    EXPECT(nb == 0);
+    /* Dead bridge silences even healthy turrets. */
+    Duel_ResetCruiser(&s);
+    s.cruiser.sub_hp[DUEL_CRUISER_SUB_BRIDGE] = 0.0f;
+    for (i = 0; i < 120; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    nb = 0;
+    for (i = 0; i < DUEL_LASER_POOL; i++)
+        if (s.lasers[i].active && s.lasers[i].owner == DUEL_SHIP_TIE) nb++;
+    EXPECT(nb == 0);
+    /* Dead domes double hull damage (single aimed bolt: 24). */
+    Duel_ResetCruiser(&s);
+    s.cruiser.sub_hp[DUEL_CRUISER_SUB_DOME0] = 0.0f;
+    s.cruiser.sub_hp[DUEL_CRUISER_SUB_DOME1] = 0.0f;
+    s.player.pos = duel_v3(100.0f, 0.0f, -900.0f);
+    s.player.orient = duel_q_identity();
+    s.player.speed = 0.0f;
+    s.player.throttle = 0.0f;
+    for (i = 0; i < 40; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    in.fire = 1;
+    Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    in.fire = 0;
+    for (i = 0; i < 120; i++)
+        Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+    EXPECT_NEAR(s.cruiser.hp, DUEL_CRUISER_HP - 24.0f, 1e-3f);
+    /* M37: rookie guns MISS (wide wobble + slow volleys), ace guns hunt.
+     * Pinned player (pos + zero speed held: exact lead, wobble only),
+     * 20 volleys each (turret_next counts them: all subs alive), damage
+     * accumulated with top-up (no death/reset mid-count). */
+    {
+        int d, volleys;
+        float lost[3] = { 0.0f, 0.0f, 0.0f };
+        for (d = 0; d <= 2; d++) {
+            Duel_SetDifficulty(&s, d);
+            Duel_SetForces(&s, 0, 0);
+            Duel_ResetCruiser(&s);
+            s.player.pos = duel_v3(0.0f, 0.0f, -1000.0f);
+            s.player.orient = duel_q_identity();
+            s.player.speed = 0.0f;
+            volleys = 0;
+            for (i = 0; i < 2400 && volleys < 20; i++) {
+                int tn0 = s.cruiser.turret_next;
+                memset(&in, 0, sizeof(in));
+                Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+                volleys += s.cruiser.turret_next - tn0;
+                /* pin the target: exact lead, wobble is the only error */
+                lost[d] += 100.0f - s.player.hp;
+                s.player.hp = 100.0f;
+                s.player.pos = duel_v3(0.0f, 0.0f, -1000.0f);
+                s.player.speed = 0.0f;
+                s.player.orient = duel_q_identity();
+            }
+            /* let the last bolts land (volleys off: count stays 20) */
+            s.cruiser.fire_cd = 999.0f;
+            for (i = 0; i < 240; i++) {
+                memset(&in, 0, sizeof(in));
+                Duel_UpdateCruiser(&s, &in, 1.0f / 60.0f);
+                lost[d] += 100.0f - s.player.hp;
+                s.player.hp = 100.0f;
+                s.player.pos = duel_v3(0.0f, 0.0f, -1000.0f);
+                s.player.speed = 0.0f;
+            }
+            EXPECT(volleys == 20);
+            printf("cruiser diff %d: %d volleys lost %.0f hp\n",
+                   d, volleys, lost[d]);
+        }
+        /* Deterministic on-device (10/40/50): strict ordering + kind
+         * rookie (<= 2 hits) + connecting ace (>= 5 hits). */
+        EXPECT(lost[0] < lost[1]);
+        EXPECT(lost[1] < lost[2]);
+        EXPECT(lost[0] <= 20.0f);
+        EXPECT(lost[2] >= 50.0f);
+    }
+    printf("cruiser ok\n");
+}
+
 static void test_duel_pvp(void) {
     /* MP-A: PvP duel with two humans. Face-to-face spawn, independent
      * inputs, cross kills, latched winner, skirmish isolation. */
@@ -3668,6 +4389,7 @@ int main(void) {
     test_reticle_ship_locked();
     test_lead_point();
     test_input_axes();
+    test_stick_expo();
     test_neutral_head_inside_cockpit();
     test_initial_heading();
     test_free_look_calibrated();
@@ -3738,6 +4460,7 @@ int main(void) {
     test_menu_rows();
     test_menu_strings();
     test_menu_values();
+    test_menu_ray();
     test_prefs_roundtrip();
     test_pilot_roundtrip();
     test_pilot_scan();
@@ -3745,6 +4468,7 @@ int main(void) {
     test_menu_highlight();
     test_easy_envelope();
     test_series();
+    test_continue();
     test_home_view();
     test_touch_level();
     test_skirmish();
@@ -3757,6 +4481,9 @@ int main(void) {
     test_duel_pvp();
     test_net_codec();
     test_drone_ai();
+    test_env_pick();
+    test_craft();
+    test_cruiser();
     if (fails == 0) printf("ALL DUEL TESTS PASS\n");
     else printf("%d FAILURES\n", fails);
     return fails == 0 ? 0 : 1;

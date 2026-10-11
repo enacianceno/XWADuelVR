@@ -155,6 +155,10 @@ extern const DuelVec3 DUEL_QUAD_SHIP; /* (-0.38, 0.46, -0.91) mid-slot */
  * with room to spare (M23 mesh40p1 was the CENTER pair, a miss).
  * Index-tip ship distance drives near/press. */
 extern const DuelVec3 DUEL_PAUSEBTN_SHIP; /* (+0.359, 0.471, -1.160) */
+/* M35 hull readout anchor (front dash center, over the mesh0p11 strip
+ * gap; model (-0.02, 0.22, 0.93) via R_y(PI), lifted to clear the
+ * floor): "100%".."0%" floats 3 cm toward the pilot, PAUSA-style. */
+extern const DuelVec3 DUEL_DASHHP_SHIP; /* (0, 0.26, -0.95) */
 #define DUEL_PAUSEBTN_PRESS_R 0.03f
 #define DUEL_PAUSEBTN_NEAR_R 0.06f
 

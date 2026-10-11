@@ -12,6 +12,7 @@ add_library(XWADuelVR SHARED
     src/duel_main.c
     src/duel_sim.c
     src/duel_net.c
+    src/duel_env.c
     src/duel_sky.c
     src/duel_sprite.c
     src/duel_depth.c

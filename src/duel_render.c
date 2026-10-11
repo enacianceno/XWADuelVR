@@ -14,6 +14,7 @@
 #include "duel_depth.h" /* M2.1: world-cell depth field (near/mid parallax) */
 #include "duel_motion.h" /* M2.2: subtle vehicle inertia at seat level */
 #include "duel_sky.h" /* P1.2: original-XWA-algorithm starfield */
+#include "duel_env.h" /* M27: background scenes (one env per match) */
 #include "duel_sprite.h" /* P1.5/P1.7: authentic DAT sprite billboards */
 #include "duel_hands.h" /* M3.0: native hand tracking (visual only) */
 #include "duel_xr.h" /* P0.4: consume reference-space (recenter) events */
@@ -50,8 +51,6 @@
 #define DUEL_STATIC_STARS 0
 /* Env-sun location in the spheremap (brightest pixel, measured): the
  * flare direction derives from this via duel_equirect_dir. */
-#define DUEL_ENV_SUN_U 0.9175f
-#define DUEL_ENV_SUN_V 0.2246f
 #define DUEL_ENV_RADIUS 20000.0f
 #define DUEL_FLARE_DIST 15000.0f
 #define DUEL_FLARE_SIZE_M 1500.0f
@@ -61,9 +60,8 @@
  * 2560-star generator is untouched (oracle still green); this filters
  * the VBO. */
 #define DUEL_STAR_DRAW_DIV 3 /* M2.2b: 854 of 2560 (-33% vs M2.2a) */
-#define DUEL_PLANET_U 0.4049f /* M2.2b: full-disc center (wide-run fit) */
-#define DUEL_PLANET_V 0.4922f
-#define DUEL_PLANET_CULL_DOT 0.9613f /* cos(16 deg): disc r=10.2 + margin */
+/* M27: body-disc cull + sun anchor moved to the env table (duel_env.h);
+ * env 0 keeps the M2.2 measured values verbatim. */
 
 /* Seat (SHIP frame): R_y(PI) * EYE_MODEL. P0.5: derived from the LIVE
  * 49-mesh XWAUP cockpit (see evidence/p0.5-seat-frame/seat_geom_live.py),
@@ -176,7 +174,13 @@ struct DuelRender {
     SDL_GPUTexture *spr_tex[DUEL_SPR_TEX_COUNT]; /* fx PNGs, NULL if missing */
     DuelSprite sprites[DUEL_SPR_SLOTS]; /* one-shot anims (booms/sparks) */
     int spr_logged;
-    SDL_GPUTexture *env_tex; /* M2.2: planetary spheremap, NULL if missing */
+    /* M27: one spheremap + star VBO per scene, preloaded at startup
+     * (pointer swap per match: no mid-frame GPU lifetime risk). */
+    SDL_GPUTexture *env_tex[DUEL_ENV_COUNT];
+    SDL_GPUBuffer *stars_vbo[DUEL_ENV_COUNT];
+    int star_count[DUEL_ENV_COUNT];
+    int env_active;
+    DuelVec3 env_sun; /* active env flare anchor (world dir) */
     /* M2.1: depth field collected once per frame (ship pos, never HMD). */
     DuelDepthP depth_near[DUEL_DEPTH_NEAR_CAP];
     DuelDepthP depth_mid[DUEL_DEPTH_MID_CAP];
@@ -216,6 +220,11 @@ struct DuelRender {
     DuelQuat menu_quat; /* LOCAL; duel_q_forward points INTO the screen */
     const DuelMenu *menu; /* main-owned, valid for the run */
     int menu_hover;     /* touch row (-1 none), eye 0+1 agree */
+    /* M35 controller aim (XR LOCAL space, published per frame by main;
+     * 0 left / 1 right). Drives the menu ray when hands are away. */
+    int aim_valid[2];
+    DuelVec3 aim_pos[2];
+    DuelQuat aim_quat[2];
     float menu_hx, menu_hy; /* touch point, panel-local */
     int menu_press[2];  /* per-side fingertip press level (hysteresis) */
     int menu_touch;     /* M11: winner hand pressed (click level) */
@@ -268,11 +277,14 @@ struct DuelRender {
     SDL_GPUTexture *white_tex, *black_tex;
     SDL_GPUTexture *diag_tex[6]; /* P0.2 mesh identity colors */
     DuelModel tie, cockpit, xwing; /* M5: xwing = ally exterior (optional) */
+    DuelModel tiein; /* M28: interceptor exterior (optional, TIE fallback) */
+    DuelModel isd; /* M30: Star Destroyer (optional until pushed) */
+    float last_hp_cruiser;
+    int last_cruiser_alive;
+    int cruiser_hit_n; /* rotating hull sphere for hit bursts */
     SDL_GPUBuffer *cube_vbo, *cube_ibo;
     SDL_GPUTransferBuffer *dyn_tbuf; /* persistent dyn upload (no per-frame alloc) */
     /* sky */
-    SDL_GPUBuffer *stars_vbo;
-    int star_count;
     SDL_GPUBuffer *sphere_vbo, *sphere_ibo;
     Uint32 sphere_index_count;
     /* dynamic */
@@ -850,25 +862,27 @@ static unsigned duel_lcg(unsigned *s) {
     return *s;
 }
 
-static void build_stars(DuelRender *r) {
+static void build_stars_for(DuelRender *r, int env) {
     /* unlit layout: pos3 color4 uv2 = 9 floats. P1.2: original-XWA
      * distribution (duel_sky); neutral white, static frame-0 brightness.
-     * M2.2a: deterministic 1/DIV decimation + planet-disc cull (env only).
-     * NOTE: call AFTER the env cook load (r->env_tex gates the cull). */
+     * M2.2a: deterministic 1/DIV decimation + body-disc cull (env only).
+     * M27: one VBO per scene (cull follows the env's own disc).
+     * NOTE: call AFTER the env cook load (env_tex gates the cull). */
+    const DuelEnv *e = &DUEL_ENVS[env];
     const int n = DUEL_SKY_STAR_COUNT;
     float *v = (float *)malloc((size_t)n * 9 * sizeof(float));
     DuelSkyStar *sky = (DuelSkyStar *)malloc((size_t)n * sizeof(*sky));
-    DuelVec3 pdir = duel_equirect_dir(DUEL_PLANET_U, DUEL_PLANET_V);
+    DuelVec3 pdir = duel_equirect_dir(e->body_u, e->body_v);
     int kept = 0, culled = 0;
     duel_sky_generate(sky);
     for (int i = 0; i < n; i++) {
         float *d;
         float b;
         if (i % DUEL_STAR_DRAW_DIV != 0) continue;
-        if (r->env_tex) {
+        if (r->env_tex[env]) {
             float dot = sky[i].dir[0] * pdir.x + sky[i].dir[1] * pdir.y +
                         sky[i].dir[2] * pdir.z;
-            if (dot > DUEL_PLANET_CULL_DOT) { culled++; continue; }
+            if (dot > e->cull_dot) { culled++; continue; }
         }
         d = v + (size_t)kept * 9;
         b = sky[i].bright;
@@ -880,12 +894,33 @@ static void build_stars(DuelRender *r) {
         d[7] = 0.0f; d[8] = 0.0f;
         kept++;
     }
-    r->stars_vbo = make_buffer(r, SDL_GPU_BUFFERUSAGE_VERTEX, (Uint32)kept * 9 * sizeof(float), v);
-    r->star_count = kept;
+    r->stars_vbo[env] = make_buffer(r, SDL_GPU_BUFFERUSAGE_VERTEX, (Uint32)kept * 9 * sizeof(float), v);
+    r->star_count[env] = kept;
     free(sky);
     free(v);
-    SDL_Log("DUEL_SKY mode=XWA_ORIGINAL gen=%d drawn=%d culled_planet=%d twinkle=%d draws=1 background=BLACK",
-            n, kept, culled, DUEL_XWA_STAR_TWINKLE);
+    SDL_Log("DUEL_SKY env=%d mode=XWA_ORIGINAL gen=%d drawn=%d culled_body=%d twinkle=%d draws=1 background=BLACK",
+            env, n, kept, culled, DUEL_XWA_STAR_TWINKLE);
+}
+
+/* M27: select the scene for the next match. Index-only swap: both the
+ * spheremap and the star VBO are preloaded, so this is free mid-frame. */
+void DuelRender_SetEnv(DuelRender *r, int env) {
+    const DuelEnv *e;
+    if (!r) return;
+    if (env < 0 || env >= DUEL_ENV_COUNT) env = 0;
+    if (!r->env_tex[env]) env = 0; /* missing cook: arena is mandatory */
+    r->env_active = env;
+    e = &DUEL_ENVS[env];
+    r->env_sun = duel_equirect_dir(e->sun_u, e->sun_v);
+    SDL_Log("DUEL_ENV active=%d file=%s", env, e->file);
+}
+
+/* M28: exterior per airframe. tiein missing -> TIE fallback (the duel
+ * still renders); xwing missing -> NULL (guarded by the caller). */
+static DuelModel *duel_craft_model(DuelRender *r, int craft) {
+    if (craft == DUEL_CRAFT_TIEIN) return r->tiein.vbo ? &r->tiein : &r->tie;
+    if (craft == DUEL_CRAFT_TIE) return &r->tie;
+    return r->xwing.vbo ? &r->xwing : NULL;
 }
 
 static void build_sphere(DuelRender *r) {
@@ -1024,6 +1059,16 @@ DuelRender *DuelRender_Create(SDL_GPUDevice *device, SDL_GPUTextureFormat swap_f
      * don't draw until XwingExterior is pushed to device storage). */
     if (!load_model(r, &r->xwing, "XwingExterior"))
         SDL_Log("DUEL XwingExterior missing: allies fly invisible");
+    /* M28: interceptor exterior (optional: the duel peer falls back to
+     * the TIE model until TieInterceptor is pushed to device storage). */
+    if (!load_model(r, &r->tiein, "TieInterceptor"))
+        SDL_Log("DUEL TieInterceptor missing: interceptor falls back to TIE");
+    /* M30: Star Destroyer (optional: cruiser mode needs the push). */
+    if (!load_model(r, &r->isd, "StarDestroyer"))
+        SDL_Log("DUEL StarDestroyer missing: cruiser flies invisible");
+    r->last_hp_cruiser = -1.0f;
+    r->last_cruiser_alive = 0;
+    r->cruiser_hit_n = 0;
     build_sphere(r);
     build_m1_cube(r);
     /* dynamic buffer: lasers (64*6 verts) + lines + hud + flash, 9 floats each */
@@ -1061,8 +1106,13 @@ DuelRender *DuelRender_Create(SDL_GPUDevice *device, SDL_GPUTextureFormat swap_f
 #if DUEL_CELESTIAL
     /* M2.2: planetary spheremap (MODE B) + procedural flare glow. The env
      * cook lands separately; a missing file draws nothing (old sun stays
-     * as fallback). */
-    r->env_tex = load_cook_tex(r, "env", "space_env.png", "DUEL_ENV");
+     * as fallback). M27: all scenes preloaded; the per-match swap is a
+     * pointer swap, never a mid-frame GPU load. */
+    {
+        int e;
+        for (e = 0; e < DUEL_ENV_COUNT; e++)
+            r->env_tex[e] = load_cook_tex(r, "env", DUEL_ENVS[e].file, "DUEL_ENV");
+    }
     {
         static unsigned char flare[DUEL_FLARE_SIZE * DUEL_FLARE_SIZE * 4];
         duel_flare_tex(flare);
@@ -1070,10 +1120,16 @@ DuelRender *DuelRender_Create(SDL_GPUDevice *device, SDL_GPUTextureFormat swap_f
                                                  DUEL_FLARE_SIZE, flare, 1);
     }
 #endif
-    /* M2.2a: stars last -- the planet-disc cull reads r->env_tex. */
-    build_stars(r);
-    r->last_hp_player = DUEL_PLAYER_HP;
-    r->last_hp_peer = DUEL_PLAYER_HP; /* MP-B1 (seen-gated anyway) */
+    /* M2.2a: stars last -- the body-disc cull reads the env cooks. */
+    {
+        int e;
+        for (e = 0; e < DUEL_ENV_COUNT; e++) build_stars_for(r, e);
+    }
+    DuelRender_SetEnv(r, 0); /* M27: arena. rng re-picks every match */
+    /* M28: -1 = unknown (hp is craft-sized now; 100 would fake-hit
+     * an interceptor at 60 on the first frame). Synced every Update. */
+    r->last_hp_player = -1.0f;
+    r->last_hp_peer = -1.0f;
     { /* M5: per-ship fx memory */
         int k;
         for (k = 0; k < DUEL_TIE_COUNT; k++) {
@@ -1184,7 +1240,11 @@ void DuelRender_Destroy(DuelRender *r) {
     SDL_ReleaseGPUBuffer(r->device, r->cockpit.ibo);
     if (r->xwing.vbo) SDL_ReleaseGPUBuffer(r->device, r->xwing.vbo);
     if (r->xwing.ibo) SDL_ReleaseGPUBuffer(r->device, r->xwing.ibo);
-    SDL_ReleaseGPUBuffer(r->device, r->stars_vbo);
+    if (r->tiein.vbo) SDL_ReleaseGPUBuffer(r->device, r->tiein.vbo);
+    if (r->tiein.ibo) SDL_ReleaseGPUBuffer(r->device, r->tiein.ibo);
+    if (r->isd.vbo) SDL_ReleaseGPUBuffer(r->device, r->isd.vbo);
+    if (r->isd.ibo) SDL_ReleaseGPUBuffer(r->device, r->isd.ibo);
+    /* M27: stars_vbo[*] released with the env textures below. */
     SDL_ReleaseGPUBuffer(r->device, r->sphere_vbo);
     SDL_ReleaseGPUBuffer(r->device, r->sphere_ibo);
     SDL_ReleaseGPUBuffer(r->device, r->dyn_vbo);
@@ -1200,15 +1260,27 @@ void DuelRender_Destroy(DuelRender *r) {
     free(r->hand_stage);
     for (int i = 0; i < DUEL_SPR_TEX_COUNT; i++)
         if (r->spr_tex[i]) SDL_ReleaseGPUTexture(r->device, r->spr_tex[i]);
-    if (r->env_tex) SDL_ReleaseGPUTexture(r->device, r->env_tex);
+    { /* M27: release every preloaded scene + its star VBO */
+        int e;
+        for (e = 0; e < DUEL_ENV_COUNT; e++) {
+            if (r->env_tex[e]) SDL_ReleaseGPUTexture(r->device, r->env_tex[e]);
+            if (r->stars_vbo[e]) SDL_ReleaseGPUBuffer(r->device, r->stars_vbo[e]);
+        }
+    }
     for (int i = 0; i < r->tie.tex_count; i++) SDL_ReleaseGPUTexture(r->device, r->tie.texs[i].tex);
     for (int i = 0; i < r->cockpit.tex_count; i++)
         SDL_ReleaseGPUTexture(r->device, r->cockpit.texs[i].tex);
     for (int i = 0; i < r->xwing.tex_count; i++)
         SDL_ReleaseGPUTexture(r->device, r->xwing.texs[i].tex);
+    for (int i = 0; i < r->tiein.tex_count; i++)
+        SDL_ReleaseGPUTexture(r->device, r->tiein.texs[i].tex);
+    for (int i = 0; i < r->isd.tex_count; i++)
+        SDL_ReleaseGPUTexture(r->device, r->isd.texs[i].tex);
     free(r->tie.prims); free(r->tie.texs);
     free(r->cockpit.prims); free(r->cockpit.texs);
     free(r->xwing.prims); free(r->xwing.texs);
+    free(r->tiein.prims); free(r->tiein.texs);
+    free(r->isd.prims); free(r->isd.texs);
     SDL_ReleaseGPUTexture(r->device, r->white_tex);
     SDL_ReleaseGPUTexture(r->device, r->black_tex);
     for (int i = 0; i < 6; i++) SDL_ReleaseGPUTexture(r->device, r->diag_tex[i]);
@@ -1310,6 +1382,35 @@ void DuelRender_Update(DuelRender *r, const DuelState *s, float dt) {
             duel_sprite_spawn(r->sprites, DUEL_SPR_SLOTS, DUEL_SPR_SPARK, 1,
                               s->peer.pos, 0.22f, 10.0f, 4.0f, 2.0f, 0.0f);
         }
+        /* M30: cruiser hit bursts (rotating hull sphere, player side). */
+        if (s->cruiser_mode && s->cruiser.alive &&
+                s->cruiser.hp < r->last_hp_cruiser - 0.01f) {
+            int bi = r->cruiser_hit_n++ % DUEL_CRUISER_SPHERES;
+            DuelVec3 to_p = duel_v3_norm(duel_v3_sub(s->player.pos,
+                                                     s->cruiser.sph[bi]));
+            DuelVec3 at = duel_v3_add(s->cruiser.sph[bi],
+                duel_v3_scale(to_p, DUEL_CRUISER_SPH_R[bi] * 0.9f));
+            spawn_burst(r, at, 30.0f, 120.0f, 10, 0.5f, 1.0f, 0.7f, 0.3f);
+            duel_sprite_spawn(r->sprites, DUEL_SPR_SLOTS, DUEL_SPR_SPARK, 1,
+                              at, 0.3f, 30.0f, 10.0f, 2.0f, 0.0f);
+        }
+        /* M30: cruiser kill (staged across the whole hull). */
+        if (r->last_cruiser_alive && !s->cruiser.alive && s->cruiser_mode) {
+            int bi;
+            SDL_Log("DUEL cruiser destroyed");
+            for (bi = 0; bi < DUEL_CRUISER_SPHERES; bi++) {
+                spawn_burst(r, s->cruiser.sph[bi], 200.0f, 400.0f, 16,
+                            0.4f, 1.0f, 1.0f, 0.95f);
+                spawn_burst(r, s->cruiser.sph[bi], 80.0f, 200.0f, 24,
+                            1.6f, 1.0f, 0.55f, 0.15f);
+            }
+            spawn_burst(r, s->cruiser.pos, 20.0f, 60.0f, 40,
+                        3.5f, 0.7f, 0.2f, 0.05f);
+            duel_sprite_spawn(r->sprites, DUEL_SPR_SLOTS, DUEL_SPR_BOOM0, 2,
+                              s->cruiser.pos, 1.5f, 400.0f, 100.0f, 3.0f, 0.0f);
+        }
+        r->last_cruiser_alive = s->cruiser.alive;
+        r->last_hp_cruiser = s->cruiser.hp;
     }
     /* muzzle flash: white-hot pop at the gun that just fired */
     if (s->player.muzzle != r->last_muzzle_p) {
@@ -2065,6 +2166,15 @@ void DuelRender_SetMenuPanel(DuelRender *r, int show, const DuelMenu *m,
     }
 }
 
+/* M35: publish one controller aim pose (XR LOCAL, per frame). */
+void DuelRender_ControllerAim(DuelRender *r, int side, DuelVec3 pos,
+                              DuelQuat quat, int valid) {
+    if (!r || side < 0 || side > 1) return;
+    r->aim_valid[side] = valid ? 1 : 0;
+    r->aim_pos[side] = pos;
+    r->aim_quat[side] = quat;
+}
+
 /* M7: hide the combat HUD (cue/diamond/lead/bars) behind menu screens.
  * Pause keeps it (frozen combat state stays informative). */
 void DuelRender_SetCombatHud(DuelRender *r, int show) {
@@ -2308,6 +2418,37 @@ static void duel_menu_seg(DynWriter *dw, DuelVec3 c, DuelVec3 px, DuelVec3 py,
                                   duel_v3_scale(py, y1)));
     dyn_vert(v, a, cr, cg, cb, 1.0f);
     dyn_vert(v + 9, b, cr, cg, cb, 1.0f);
+}
+
+/* M35 controller ray in world space: the aim pose goes through the
+ * exact hand path (cal + eye + motion), twice (origin + 1 m along
+ * the aim -Z), so the direction survives rotation-only frames. */
+static int duel_menu_ray_world(DuelRender *r, const DuelState *s, int sd,
+                               DuelVec3 *w0, DuelVec3 *wd) {
+    DuelHandJoint j0, j1;
+    DuelVec3 p0, p1, d;
+    DuelVec3 fwd;
+    DuelQuat hmo;
+    if (!r->aim_valid[sd]) return 0;
+    hmo = duel_motion_quat(&r->motion);
+    fwd = duel_q_forward(r->aim_quat[sd]);
+    j0.pos = r->aim_pos[sd];
+    j0.quat = r->aim_quat[sd];
+    j0.pos_valid = 1;
+    j0.rot_valid = 1;
+    j1.pos = duel_v3_add(r->aim_pos[sd], fwd);
+    j1.quat = r->aim_quat[sd];
+    j1.pos_valid = 1;
+    j1.rot_valid = 1;
+    DuelHands_JointWorld(&r->cal, s->player.orient, s->player.pos,
+                         DUEL_SEAT_POS, r->motion.off_p, hmo, &j0, &p0);
+    DuelHands_JointWorld(&r->cal, s->player.orient, s->player.pos,
+                         DUEL_SEAT_POS, r->motion.off_p, hmo, &j1, &p1);
+    d = duel_v3_sub(p1, p0);
+    if (duel_v3_dot(d, d) < 1e-8f) return 0;
+    *w0 = p0;
+    *wd = duel_v3_norm(d);
+    return 1;
 }
 
 void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
@@ -2835,6 +2976,41 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         }
 #endif
     }
+    /* M35 controller ray fallback: when no finger owns the panel and
+     * RAYO MANDO is on, a tracked aim ray hovers rows (right wins).
+     * Click = trigger/A edge in main; both eyes agree (idempotent). */
+    if (r->menu_show && r->menu && r->menu->ray_on &&
+            r->menu_hover < 0 && !r->menu_touch) {
+        DuelVec3 pax;
+        DuelVec3 pay;
+        DuelVec3 pn;
+        /* Controllers-only rigs never run the touch reset above. */
+        if (!r->hands_mask) {
+            r->menu_hover = -1;
+            r->menu_touch = 0;
+        }
+        pax = duel_q_right(menu_q);
+        pay = duel_q_up(menu_q);
+        pn = duel_v3_scale(duel_q_forward(menu_q), -1.0f);
+        int order[2] = { 1, 0 };
+        int o;
+        for (o = 0; o < 2; o++) {
+            int sd = order[o];
+            DuelVec3 w0, wd;
+            float lx, ly;
+            int row;
+            if (!r->aim_valid[sd]) continue;
+            if (!duel_menu_ray_world(r, s, sd, &w0, &wd)) continue;
+            row = DuelMenu_RayHit(r->menu, w0, wd, menu_c, pax, pay, pn,
+                                  &lx, &ly);
+            if (row >= 0) {
+                r->menu_hover = row;
+                r->menu_hx = lx;
+                r->menu_hy = ly;
+                break;
+            }
+        }
+    }
     hbone_range.count = dw.count - hbone_range.first;
 #if DUEL_VIRTUAL_HANDS
     /* M3.3: throttle quadrant handle sliding along the left slot
@@ -2901,6 +3077,32 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         else { lr = 1.0f; lg = 0.85f; lb = 0.40f; }
         duel_menu_text(&dw, bc, bpx, bpy, "PAUSA", 0.0f, -0.013f, 0.0032f,
                        1, lr, lg, lb);
+        /* M35 hull readout: "100%".."0%" on the front dash (craft-sized,
+         * green > 50, amber > 25, red at/below; same depth-tested pipe
+         * and 3.2 mm proven glyphs as PAUSA). */
+        {
+            DuelVec3 h = DUEL_DASHHP_SHIP;
+            DuelVec3 hn = duel_v3_norm(duel_v3_sub(DUEL_SEAT_POS, h));
+            DuelVec3 hrx = duel_v3_norm(duel_v3_cross(duel_v3(0, 1, 0), hn));
+            DuelVec3 hup = duel_v3_cross(hn, hrx);
+            DuelVec3 hc = duel_v3_add(s->player.pos, duel_q_rot(s->player.orient,
+                duel_v3_add(h, duel_v3_scale(hn, 0.030f))));
+            DuelVec3 hpx = duel_q_rot(s->player.orient, hrx);
+            DuelVec3 hpy = duel_q_rot(s->player.orient, hup);
+            float hf = s->player.hp / Duel_CraftHP(s->player.craft);
+            char hb[8];
+            float hr, hg, hb2;
+            int pct;
+            if (hf < 0.0f) hf = 0.0f;
+            if (hf > 1.0f) hf = 1.0f;
+            pct = (int)(hf * 100.0f + 0.5f);
+            if (hf > 0.5f) { hr = 0.2f; hg = 1.0f; hb2 = 0.3f; }
+            else if (hf > 0.25f) { hr = 1.0f; hg = 0.85f; hb2 = 0.25f; }
+            else { hr = 1.0f; hg = 0.25f; hb2 = 0.2f; }
+            snprintf(hb, sizeof(hb), "%d%%", pct);
+            duel_menu_text(&dw, hc, hpx, hpy, hb, 0.0f, 0.0f, 0.0032f,
+                           1, hr, hg, hb2);
+        }
     }
     btn_line_range.count = dw.count - btn_line_range.first;
     /* M7 menu panel (world-locked; hands AND controllers). Two pure
@@ -3038,6 +3240,52 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
             }
         }
         /* M4e: finger-ray draw removed (touch UI). */
+        /* M35 controller rays (menu only, RAYO MANDO on): cyan aim
+         * beams, depth-tested like the rest of the menu paint.
+         * M37 ray dot: a bright diamond where the beam lands, 1 mm
+         * over the glyph layer (cursor feel: the ray is THERE). */
+        if (r->menu->ray_on) {
+            DuelVec3 pn = duel_v3_scale(duel_q_forward(menu_q), -1.0f);
+            int sd;
+            for (sd = 0; sd < 2; sd++) {
+                DuelVec3 w0, wd, w1;
+                float *rv;
+                float lx, ly, th = 1.2f;
+                int plane, row;
+                if (!r->aim_valid[sd]) continue;
+                if (!duel_menu_ray_world(r, s, sd, &w0, &wd)) continue;
+                /* M38: one plane test drives both (beam dies at the
+                 * dot; full beam only when the panel is missed). */
+                plane = DuelMenu_RayPlane(r->menu, w0, wd, menu_c, pax,
+                                          pay, pn, &lx, &ly, &th);
+                row = plane ? DuelMenu_HitRow(r->menu, lx, ly) : -1;
+                w1 = plane ? duel_v3_add(w0, duel_v3_scale(wd, th))
+                           : duel_v3_add(w0, duel_v3_scale(wd, 1.2f));
+                rv = dyn_reserve(&dw, 2);
+                if (!rv) break;
+                dyn_vert(rv + 0, w0, 0.65f, 0.95f, 1.0f, 0.9f);
+                dyn_vert(rv + 9, w1, 0.65f, 0.95f, 1.0f, 0.9f);
+                if (row >= 0) {
+                    DuelVec3 hp = duel_v3_add(menu_c, duel_v3_add(
+                        duel_v3_scale(pax, lx), duel_v3_add(
+                            duel_v3_scale(pay, ly),
+                            duel_v3_scale(pn, 0.006f))));
+                    DuelVec3 du = duel_v3_scale(pay, 0.004f);
+                    DuelVec3 dr = duel_v3_scale(pax, 0.004f);
+                    float *rd = dyn_reserve(&dw, 8);
+                    DuelVec3 t, rr, b, l;
+                    if (!rd) break;
+                    t = duel_v3_add(hp, du);
+                    rr = duel_v3_add(hp, dr);
+                    b = duel_v3_sub(hp, du);
+                    l = duel_v3_sub(hp, dr);
+                    dyn_vert(rd + 0, t, 1, 1, 1, 1); dyn_vert(rd + 9, rr, 1, 1, 1, 1);
+                    dyn_vert(rd + 18, rr, 1, 1, 1, 1); dyn_vert(rd + 27, b, 1, 1, 1, 1);
+                    dyn_vert(rd + 36, b, 1, 1, 1, 1); dyn_vert(rd + 45, l, 1, 1, 1, 1);
+                    dyn_vert(rd + 54, l, 1, 1, 1, 1); dyn_vert(rd + 63, t, 1, 1, 1, 1);
+                }
+            }
+        }
     }
     menu_line_range.count = dw.count - menu_line_range.first;
     /* reticle: XWA-style gunsight (cross + circle + center dot) collimated
@@ -3097,12 +3345,26 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
          * toward it; hidden inside the 12-deg view cone (you're looking
          * at it: red diamond + green lead pip cover it). No-depth HUD
          * lines: always visible, wherever you look. */
+        /* M35: the M7 hide_hud flag was written but never read, so the
+         * combat HUD (now +13 M32 diamonds) drew over every menu screen
+         * = the returned moving diagonals. Gate cue/diamond/lead/subs. */
+        if (!r->menu_hide_hud) {
         /* M5: auto-target = nearest living tie; cue + diamonds + lead
          * pip all follow it. */
         int tgt = Duel_AutoTarget(s);
         const DuelShip *tp = tgt >= 0 ? &s->ties[tgt] : NULL;
         /* MP-B1: in a duel the cue + diamonds + lead pip follow the peer. */
         if (s->duel_mode && s->peer.alive) tp = &s->peer;
+        /* M30: vs the cruiser everything follows a static pseudo-ship
+         * (the cue/lead math only needs pos/orient/speed). */
+        DuelShip cship;
+        if (s->cruiser_mode && s->cruiser.alive) {
+            memset(&cship, 0, sizeof cship);
+            cship.pos = s->cruiser.pos;
+            cship.orient = duel_q_identity();
+            cship.alive = 1;
+            tp = &cship;
+        }
         if (tp) {
             float gdx = 0.0f, gdy = 0.0f;
             if (Duel_HeadGuide(eq, cam_pos, tp->pos, &gdx, &gdy)) {
@@ -3164,17 +3426,63 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
             }
             (void)dist;
         }
+        /* M32: subsystem diamonds + micro bars (turrets/domes/bridge).
+         * No-depth HUD: always visible, wherever you look. */
+        if (s->cruiser_mode && s->cruiser.alive) {
+            int bi;
+            for (bi = 0; bi < DUEL_CRUISER_SUBS; bi++) {
+                DuelVec3 sp, to_s, fw, rt, up;
+                DuelVec3 d0, d1, d2, d3, bc, bgl, bgr, bfg;
+                float dist, R, frac, maxhp, cr, cg, cb;
+                float *md;
+                if (s->cruiser.sub_hp[bi] <= 0.0f) continue;
+                maxhp = Duel_CruiserSubMaxHP(bi);
+                frac = maxhp > 0.0f ? s->cruiser.sub_hp[bi] / maxhp : 0.0f;
+                sp = Duel_CruiserSubPos(s, bi);
+                to_s = duel_v3_sub(sp, cam_pos);
+                dist = duel_v3_len(to_s);
+                fw = duel_v3_scale(to_s, 1.0f / (dist > 1e-3f ? dist : 1.0f));
+                rt = duel_v3_norm(duel_v3_cross(fw, duel_v3(0, 1, 0)));
+                up = duel_v3_cross(rt, fw);
+                R = bi == DUEL_CRUISER_SUB_BRIDGE ? 50.0f : 20.0f;
+                md = dyn_reserve(&dw, 12);
+                if (!md) break;
+                d0 = duel_v3_add(sp, duel_v3_scale(up, R));
+                d1 = duel_v3_add(sp, duel_v3_scale(rt, R));
+                d2 = duel_v3_sub(sp, duel_v3_scale(up, R));
+                d3 = duel_v3_sub(sp, duel_v3_scale(rt, R));
+                bc = duel_v3_add(sp, duel_v3_scale(up, R + 8.0f));
+                bgl = duel_v3_sub(bc, duel_v3_scale(rt, R));
+                bgr = duel_v3_add(bc, duel_v3_scale(rt, R));
+                bfg = duel_v3_add(bgl, duel_v3_scale(rt, 2.0f * R * frac));
+                cr = 1.0f - 0.8f * frac;
+                cg = 0.2f + 0.8f * frac;
+                cb = 0.3f - 0.1f * frac;
+                dyn_vert(md + 0, d0, 1.0f, 0.85f, 0.2f, 0.9f); dyn_vert(md + 9, d1, 1.0f, 0.85f, 0.2f, 0.9f);
+                dyn_vert(md + 18, d1, 1.0f, 0.85f, 0.2f, 0.9f); dyn_vert(md + 27, d2, 1.0f, 0.85f, 0.2f, 0.9f);
+                dyn_vert(md + 36, d2, 1.0f, 0.85f, 0.2f, 0.9f); dyn_vert(md + 45, d3, 1.0f, 0.85f, 0.2f, 0.9f);
+                dyn_vert(md + 54, d3, 1.0f, 0.85f, 0.2f, 0.9f); dyn_vert(md + 63, d0, 1.0f, 0.85f, 0.2f, 0.9f);
+                dyn_vert(md + 72, bgl, 0.15f, 0.15f, 0.15f, 0.7f); dyn_vert(md + 81, bgr, 0.15f, 0.15f, 0.15f, 0.7f);
+                dyn_vert(md + 90, bgl, cr, cg, cb, 0.9f); dyn_vert(md + 99, bfg, cr, cg, cb, 0.9f);
+            }
+        }
+        } /* M35 !menu_hide_hud */
     }
     line_range.count = dw.count - line_range.first;
     /* HUD bars in NDC (identity MVP used at draw) */
     hud_range.first = dw.count;
+    if (!r->menu_hide_hud) { /* M35: bars hide behind menu screens too */
     {
-        float ph = s->player.hp / DUEL_PLAYER_HP;
+        /* M30: player bar is craft-sized too (an interceptor at 60
+         * showed 60% on a 100 scale). */
+        float ph = s->player.hp / Duel_CraftHP(s->player.craft);
         /* M5: right bar follows the auto-target (nearest living tie). */
         int htgt = Duel_AutoTarget(s);
         float th = htgt >= 0 ? s->ties[htgt].hp / DUEL_TIE_HP : 0.0f;
         /* MP-B1: in a duel the right bar is the peer's hull. */
-        if (s->duel_mode) th = s->peer.alive ? s->peer.hp / DUEL_PLAYER_HP : 0.0f;
+        if (s->duel_mode) th = s->peer.alive ? s->peer.hp / Duel_CraftHP(s->peer.craft) : 0.0f;
+        /* M30: vs the cruiser the right bar is the hull. */
+        if (s->cruiser_mode) th = s->cruiser.alive ? s->cruiser.hp / DUEL_CRUISER_HP : 0.0f;
         /* bg + fg for player (left) and tie (right) */
         struct { float x0, x1, frac, r, g, b; } bars[2] = {
             { -0.9f, -0.08f, ph, 0.2f, 1.0f, 0.3f },
@@ -3201,6 +3509,7 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
             dyn_vert(d + 99, duel_v3(bars[i].x0, y1, 0), bars[i].r, bars[i].g, bars[i].b, 0.9f);
         }
     }
+    } /* M35 !menu_hide_hud */
     hud_range.count = dw.count - hud_range.first;
     /* explosion flash fullscreen */
     flash_range.first = dw.count;
@@ -3248,7 +3557,7 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         /* fixed sun (XWA backdrop flare sprite): world direction, far but
          * inside the 30000 m frustum; depth-tested like everything else.
          * Retired while the M2.2 env is present (it brings its own sun). */
-        if (r->spr_tex[DUEL_SPR_SUN] && !r->env_tex) {
+        if (r->spr_tex[DUEL_SPR_SUN] && !r->env_tex[r->env_active]) {
             DuelVec3 sundir = duel_v3_norm(duel_v3(-0.30f, 0.35f, -0.90f));
             DuelVec3 c = duel_v3_add(ep, duel_v3_scale(sundir, 8000.0f));
             duel_sprite_quad(&c, &basis_r, &basis_u, 2400.0f, 2400.0f,
@@ -3263,8 +3572,8 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
          * (never face-glued); gain follows view alignment, 0 past ~60 deg.
          * The glow texture is black-bordered by construction (no white
          * quads, ever). */
-        if (r->env_tex && r->spr_tex[DUEL_SPR_FLARE]) {
-            DuelVec3 fsun = duel_equirect_dir(DUEL_ENV_SUN_U, DUEL_ENV_SUN_V);
+        if (r->env_tex[r->env_active] && r->spr_tex[DUEL_SPR_FLARE]) {
+            DuelVec3 fsun = r->env_sun; /* M27: active env flare anchor */
             float fg = duel_flare_gain(cam_fwd, fsun);
             /* sun and flare are mutually exclusive (env_tex gate), so at
              * most slots+1 quads; the cap below is belt-and-braces. */
@@ -3417,7 +3726,7 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
      * effective infinity with zero translation parallax. Drawn before the
      * XWA stars (both depth-write-free, order irrelevant). */
 #if DUEL_CELESTIAL
-    if (r->env_tex) {
+    if (r->env_tex[r->env_active]) {
         DuelMat4 esm = { { DUEL_ENV_RADIUS, 0, 0, 0, 0, DUEL_ENV_RADIUS, 0, 0,
                             0, 0, DUEL_ENV_RADIUS, 0, 0, 0, 0, 1 } };
         DuelMat4 esky = duel_m4_rigid_inv(eq, duel_v3(0.0f, 0.0f, 0.0f));
@@ -3443,7 +3752,7 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         SDL_PushGPUFragmentUniformData(cmd, 0, &efsu, sizeof efsu);
         memset(ebinds, 0, sizeof ebinds);
         ebinds[0].texture = r->black_tex;
-        ebinds[1].texture = r->env_tex;
+        ebinds[1].texture = r->env_tex[r->env_active];
         ebinds[0].sampler = r->sampler;
         ebinds[1].sampler = r->sampler;
         SDL_BindGPUFragmentSamplers(rp, 0, ebinds, 2);
@@ -3458,7 +3767,7 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
     {
         SDL_BindGPUGraphicsPipeline(rp, r->pipe_points_test);
         SDL_GPUBufferBinding vb;
-        memset(&vb, 0, sizeof vb); vb.buffer = r->stars_vbo;
+        memset(&vb, 0, sizeof vb); vb.buffer = r->stars_vbo[r->env_active];
         SDL_BindGPUVertexBuffers(rp, 0, &vb, 1);
         UnlitVSU vsu;
         DuelMat4 sky_view = duel_m4_rigid_inv(eq, duel_v3(0.0f, 0.0f, 0.0f));
@@ -3466,7 +3775,7 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
         memcpy(vsu.mvp, sky_vp.m, sizeof vsu.mvp);
         vsu.point_size = 2.5f; vsu.p0 = vsu.p1 = vsu.p2 = 0;
         SDL_PushGPUVertexUniformData(cmd, 0, &vsu, sizeof vsu);
-        SDL_DrawGPUPrimitives(rp, (Uint32)r->star_count, 1, 0, 0);
+        SDL_DrawGPUPrimitives(rp, (Uint32)r->star_count[r->env_active], 1, 0, 0);
     }
 #endif
     /* M5: the furball. OPT frame: duel_model_matrix (R_y(PI) basis).
@@ -3474,22 +3783,39 @@ void DuelRender_Eye(DuelRender *r, SDL_GPUCommandBuffer *cmd,
      * missing from device storage until pushed). */
     {
         int k;
+        /* M29: skirmish mirror (ties fly ENEMIGA, allies MI NAVE). */
         for (k = 0; k < DUEL_TIE_COUNT; k++) {
+            DuelModel *tmod;
+            DuelMat4 tm;
             if (!s->ties[k].alive) continue;
-            DuelMat4 tm = duel_model_matrix(s->ties[k].orient, s->ties[k].pos);
-            draw_model(r, NULL, cmd, rp, &r->tie, vp.m, tm.m, 0, 0, NULL);
+            tmod = duel_craft_model(r, s->ties[k].craft);
+            if (!tmod) tmod = &r->tie; /* required model: always draws */
+            tm = duel_model_matrix(s->ties[k].orient, s->ties[k].pos);
+            draw_model(r, NULL, cmd, rp, tmod, vp.m, tm.m, 0, 0, NULL);
         }
-        if (r->xwing.vbo) {
-            for (k = 0; k < DUEL_ALLY_COUNT; k++) {
-                if (!s->allies[k].alive) continue;
-                DuelMat4 am = duel_model_matrix(s->allies[k].orient, s->allies[k].pos);
-                draw_model(r, NULL, cmd, rp, &r->xwing, vp.m, am.m, 0, 0, NULL);
-            }
-            /* MP-B1: duel peer exterior (same X-Wing; green bolts mark it). */
-            if (s->duel_mode && s->peer.alive) {
+        for (k = 0; k < DUEL_ALLY_COUNT; k++) {
+            DuelModel *amod;
+            DuelMat4 am;
+            if (!s->allies[k].alive) continue;
+            amod = duel_craft_model(r, s->allies[k].craft);
+            if (!amod) continue;
+            am = duel_model_matrix(s->allies[k].orient, s->allies[k].pos);
+            draw_model(r, NULL, cmd, rp, amod, vp.m, am.m, 0, 0, NULL);
+        }
+        /* M28: duel peer exterior follows the ENEMIGA pick (green bolts
+         * still mark it). */
+        if (s->duel_mode && s->peer.alive) {
+            DuelModel *pmod = duel_craft_model(r, s->peer.craft);
+            if (pmod) {
                 DuelMat4 pm = duel_model_matrix(s->peer.orient, s->peer.pos);
-                draw_model(r, NULL, cmd, rp, &r->xwing, vp.m, pm.m, 0, 0, NULL);
+                draw_model(r, NULL, cmd, rp, pmod, vp.m, pm.m, 0, 0, NULL);
             }
+        }
+        /* M30: the cruiser (dead hull stays drawn: a killed ISD is a
+         * wreck you fly past, not a pop). */
+        if (s->cruiser_mode && r->isd.vbo) {
+            DuelMat4 cm = duel_model_matrix(s->cruiser.orient, s->cruiser.pos);
+            draw_model(r, NULL, cmd, rp, &r->isd, vp.m, cm.m, 0, 0, NULL);
         }
     }
     /* cockpit (always; ship frame, OPT basis included). Player exterior is
