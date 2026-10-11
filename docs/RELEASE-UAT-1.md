@@ -10,7 +10,8 @@ Primera APK para prueba de usuario (UAT) de XWADuelVR.
 - Menú touch + tablet agarrada de los lados.
 - Combate X-Wing vs TIE, rondas 1/3/5.
 - Botón físico de pausa **A** (par A/C, consola derecha).
-- Plan completo y plantilla de reporte: [docs/UAT.md](docs/UAT.md).
+- Plan completo y plantilla de reporte:
+  [docs/UAT.md](https://github.com/enacianceno/XWADuelVR/blob/master/docs/UAT.md).
 
 ## Instalación
 
