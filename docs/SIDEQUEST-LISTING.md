@@ -1,7 +1,13 @@
 # Ficha SideQuest — XWADuelVR (lista para pegar)
 
-Publicar requiere tu cuenta en https://dashboard.sidequestvr.com
-(Apps → Create App). Yo no puedo subirla por ti.
+Publicar requiere tu cuenta de SideQuest y se hace en WEB (la app
+de PC solo instala/navega, no publica). OJO: el portal viejo
+`dashboard.sidequestvr.com` está muerto (DNS caído, verificado
+2026-10-11); entra a https://sidequestvr.com con tu cuenta y busca
+la sección de desarrollador (menú de cuenta: Developers / My Apps /
+Submit). Si no la ves, pregunta en el Discord oficial
+(https://discord.com/invite/r38T5rR, canal de devs): ellos indican
+la ruta actual. Yo no puedo subirla por ti.
 
 ## Paso 0 (obligatorio): publica el Release UAT 2
 
